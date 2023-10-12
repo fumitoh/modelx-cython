@@ -63,6 +63,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def has_args(self):
         return bool(self.params)
 
+    def get_argtype_expr(self, arg: str) -> str:
+        return self._typeinfo.get_argtype_expr(arg)
+
     def get_rettype_expr(self):
         if self.has_typeinfo():
             return self._typeinfo.get_rettype_expr()
@@ -229,7 +232,6 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         self.module_name = module_name
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.module = self.wrapper.module
-        self.type_info = type_info
         self.config = config
         space = SpaceVisitor(module_name, source, type_info, ref_type_info)
         self.cells_info = space.cells_info
@@ -404,48 +406,36 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         param_list = list(funcdef.params.params + funcdef.params.posonly_params)[
             1:
         ]  # remove self
-        paramstr_list = [p.name.value for p in param_list]
 
-        type_info = self._get_type_info(funcdef, cls_name)
+        name = funcdef.name.value
+        if name[:len(FORMULA_PREF)] == FORMULA_PREF:
+            name = name[len(FORMULA_PREF):]
 
-        if paramstr_list:
-            # Add parameter type hints
-            if type_info:
-                updated_params = [funcdef.params.params[0]]  # add self first
-                for param in param_list:
-                    param_name = param.name.value
-                    if type_info.get_argtype_expr(param_name):
-                        updated_params.append(
-                            param.with_changes(
-                                annotation=cst.Annotation(
-                                    annotation=cst.parse_expression(
-                                        type_info.get_argtype_expr(param_name),
-                                        config=self.module.config_for_parsing,
-                                    )
+        cells = self.cells_info.get((cls_name, name))
+
+        # Add parameter type hints
+        if cells and cells.has_typeinfo() and cells.has_args():
+            updated_params = [funcdef.params.params[0]]  # add self first
+            for param in param_list:
+                param_name = param.name.value
+                if cells.get_argtype_expr(param_name):
+                    updated_params.append(
+                        param.with_changes(
+                            annotation=cst.Annotation(
+                                annotation=cst.parse_expression(
+                                    cells.get_argtype_expr(param_name),
+                                    config=self.module.config_for_parsing,
                                 )
                             )
                         )
-                    else:
-                        updated_params.append(param)
+                    )
+                else:
+                    updated_params.append(param)
 
-                return funcdef.params.with_changes(params=tuple(updated_params))
+            return funcdef.params.with_changes(params=tuple(updated_params))
 
         return None
 
-    def _get_type_info(
-        self, funcdef: cst.FunctionDef, cls_name: str
-    ) -> Union[TypeInfo, None]:
-        name = funcdef.name.value
-
-        pref: str = (
-            ""
-            if (
-                name[: len(FORMULA_PREF)] == FORMULA_PREF
-                or name[:2] == name[-2:] == "__"
-            )
-            else FORMULA_PREF
-        )
-        return self.type_info.get(self.module_name + "." + cls_name + "." + pref + name)
 
     @m.call_if_inside(m.ClassDef())
     @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_COPY_REFS)))
@@ -474,7 +464,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
-                type_info = self._get_type_info(original_node, cls_name)
+                cells = self.cells_info.get((cls_name, meth_name[len(FORMULA_PREF):]))
 
                 decorators = [
                     cst.Decorator(
@@ -483,10 +473,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                         )
                     )
                 ]
-                if type_info:
+                if cells and cells.has_typeinfo():
                     returns = cst.Annotation(
                         annotation=cst.parse_expression(
-                            type_info.get_rettype_expr(),
+                            cells.get_rettype_expr(),
                             config=self.module.config_for_parsing,
                         )
                     )
