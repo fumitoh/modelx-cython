@@ -374,12 +374,8 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
     @m.call_if_inside(m.FunctionDef(name=cst.Name("__init__")))
     @m.leave(m.SimpleStatementLine())
     def remove_cache_assigns(self, original_node, updated_node):
-        funcdef = self.get_metadata(
-            ParentNodeProvider, self.get_metadata(ParentNodeProvider, original_node)
-        )
-        clsdef = self.get_metadata(
-            ParentNodeProvider, self.get_metadata(ParentNodeProvider, funcdef)
-        )
+        funcdef = self.get_parent(original_node, level=2)
+        clsdef = self.get_parent(funcdef, level=2)
         if (
             m.matches(funcdef, m.FunctionDef(name=cst.Name("__init__")))
             and m.matches(clsdef, m.ClassDef())
@@ -466,10 +462,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
-                self.get_metadata(
-                    ParentNodeProvider,
-                    self.get_metadata(ParentNodeProvider, original_node),
-                ),
+                self.get_parent(original_node, level=2),
                 cst.ClassDef,
             ).name.value
 
