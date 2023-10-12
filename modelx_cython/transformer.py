@@ -88,11 +88,14 @@ class RefInfo:
 
 class SpaceAddin:
 
-    def get_scope(self, node, level=0):
+    def get_parent(self, node, level=0):
         while level:
             node = self.get_metadata(ParentNodeProvider, node)
             level -= 1
-        return self.get_metadata(ScopeProvider, node)
+        return node
+    
+    def get_scope(self, node, level=0):
+        return self.get_metadata(ScopeProvider, self.get_parent(node, level=level))
     
     def is_space_scope(self, node, level=0):
         scope = self.get_scope(node, level)
@@ -136,12 +139,8 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_ASSIGN_REFS)))
     @m.leave(m.SimpleStatementLine())
     def collect_refs_info(self, original_node):
-        scope = self.get_scope(original_node, level=2)
-        if (
-            isinstance(scope, ClassScope)
-            and scope.name[: len(SPACE_PREF)] == SPACE_PREF
-            and isinstance(scope.parent, GlobalScope)
-        ):
+
+        if self.is_space_scope(original_node, level=2):
             # SimpleStatemetn in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
 
             node = original_node
@@ -171,12 +170,8 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     @m.call_if_inside(m.ClassDef())
     @m.visit(m.FunctionDef())
     def collect_methods(self, original_node):
-        scope = self.get_metadata(ScopeProvider, original_node)
-        if (
-            isinstance(scope, ClassScope)
-            and scope.name[: len(SPACE_PREF)] == SPACE_PREF
-            and isinstance(scope.parent, GlobalScope)
-        ):
+
+        if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
                 self.get_metadata(
                     ParentNodeProvider,
