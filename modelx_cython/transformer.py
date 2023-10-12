@@ -23,6 +23,7 @@ from modelx_cython.consts import (
     CY_BOOL_T,
     MX_ASSIGN_REFS,
     MX_COPY_REFS,
+    is_user_defined,
 )
 
 
@@ -85,8 +86,23 @@ class RefInfo:
     name: str
     type_expr: Union[str, NoneType]
 
+class SpaceAddin:
 
-class SpaceVisitor(m.MatcherDecoratableVisitor):
+    def get_scope(self, node, level=0):
+        while level:
+            node = self.get_metadata(ParentNodeProvider, node)
+            level -= 1
+        return self.get_metadata(ScopeProvider, node)
+    
+    def is_space_scope(self, node, level=0):
+        scope = self.get_scope(node, level)
+        return  bool(
+            isinstance(scope, ClassScope)
+            and scope.name[: len(SPACE_PREF)] == SPACE_PREF
+            and isinstance(scope.parent, GlobalScope)
+        )
+
+class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(self, module_name, source, type_info: dict, ref_type_info: dict):
@@ -94,20 +110,33 @@ class SpaceVisitor(m.MatcherDecoratableVisitor):
         self.module_name = module_name
         self.cells_info = {}
         self.ref_info = {}
+        self.space_info = {}
         self.type_info = type_info
         self.ref_type_info = ref_type_info
-        cst.metadata.MetadataWrapper(cst.parse_module(source)).visit(self)
+        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        self.wrapper.visit(self)
+
+
+    @m.call_if_inside(m.ClassDef())
+    @m.call_if_inside(m.FunctionDef(name=cst.Name("__init__")))
+    @m.leave(m.SimpleStatementLine())
+    def collect_space_info(self, original_node):
+        if self.is_space_scope(original_node, level=2):
+            node = original_node
+
+            try:
+                target = cst.ensure_type(node.body[0], cst.Assign).targets[0].target
+            except Exception:
+                return
+            
+            if (target.value.value == MX_SELF and is_user_defined(target.attr.value)):
+                self.space_info[target.attr.value] = self.wrapper.module.code_for_node(node.body[0].value)
 
     @m.call_if_inside(m.ClassDef())
     @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_ASSIGN_REFS)))
     @m.leave(m.SimpleStatementLine())
     def collect_refs_info(self, original_node):
-        scope = self.get_metadata(
-            ScopeProvider,
-            self.get_metadata(
-                ParentNodeProvider, self.get_metadata(ParentNodeProvider, original_node)
-            ),
-        )
+        scope = self.get_scope(original_node, level=2)
         if (
             isinstance(scope, ClassScope)
             and scope.name[: len(SPACE_PREF)] == SPACE_PREF
@@ -190,7 +219,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor):
         return False
 
 
-class SpaceTransformer(m.MatcherDecoratableTransformer):
+class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(
@@ -210,6 +239,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer):
         space = SpaceVisitor(module_name, source, type_info, ref_type_info)
         self.cells_info = space.cells_info
         self.ref_info = space.ref_info
+        self.space_info = space.space_info
 
     @property
     def package(self) -> str:
@@ -308,6 +338,22 @@ class SpaceTransformer(m.MatcherDecoratableTransformer):
                     is_first = False
 
                 decl_stmts.append(stmt)
+
+            is_first = True
+            for space in self.space_info.keys():
+
+                stmt = cst.parse_statement(
+                    f"{space} = {CY_MOD}.declare('object', visibility='public')",
+                    config=self.module.config_for_parsing,
+                )
+                if is_first:
+                    stmt = stmt.with_changes(
+                        leading_lines=stmt.leading_lines + (cst.EmptyLine(),)
+                    )
+                    is_first = False
+
+                decl_stmts.append(stmt)
+
 
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
