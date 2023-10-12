@@ -463,12 +463,8 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
     @m.call_if_inside(m.ClassDef())
     @m.leave(m.FunctionDef())
     def update_method(self, original_node, updated_node):
-        scope = self.get_metadata(ScopeProvider, original_node)
-        if (
-            isinstance(scope, ClassScope)
-            and scope.name[: len(SPACE_PREF)] == SPACE_PREF
-            and isinstance(scope.parent, GlobalScope)
-        ):
+
+        if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
                 self.get_metadata(
                     ParentNodeProvider,
