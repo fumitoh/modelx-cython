@@ -458,10 +458,6 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
             meth_name = original_node.name.value
 
-            has_params = bool(
-                (updated_node.params.params + updated_node.params.posonly_params)[1:]
-            )  # True if not empty
-
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 cells = self.cells_info.get((cls_name, meth_name[len(FORMULA_PREF):]))
@@ -480,7 +476,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                             config=self.module.config_for_parsing,
                         )
                     )
-                    if has_params:
+                    if cells.has_args():
                         parameters = self._add_param_type_hints(
                             updated_node, cls_name=cls_name
                         )
