@@ -1,15 +1,18 @@
 import sys
 import os
+import textwrap
 import pathlib
 import shutil
 import runpy
 import ast
 import argparse
+import subprocess
 from typing import IO, TYPE_CHECKING, List, Optional, Tuple
 
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.transformer import SpaceTransformer
+
 
 def increment_backups(
         base_path: pathlib.Path,
@@ -59,14 +62,17 @@ class HandlerError(Exception):
 def translate_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> None:
 
     orig_path = pathlib.Path(args.model_path).resolve()
-    model_path = orig_path.parent / (orig_path.name + "_cy")
+    work_dir = orig_path.parent
+    model_name = orig_path.name + "_cy"
+    model_path = work_dir / model_name
     increment_backups(model_path)
     shutil.copytree(orig_path, model_path)
     shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
-    logger = run_sample(orig_path, orig_path.name + "_cy")
+    logger = run_sample(orig_path, model_name)
     config = ast.literal_eval(pathlib.Path(args.paramfile).read_text())
 
+    modules = [model_path / (MX_SYS_MOD + ".py")]
     for m in logger.modules:
         subs = m.split(".")
         assert subs.pop(0) == model_path.name
@@ -82,26 +88,42 @@ def translate_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]
             config=config["spaces"]
         )
         src_path.write_text(trans.transformed.code)
+        modules.append(src_path)
+
+    create_setup(work_dir, model_name, modules=modules)
+
+    if not args.translate_only:
+        return compile_main(work_dir)
+
+
+def compile_main(work_dir: pathlib.Path) -> None:
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    cmd = subprocess.run([sys.executable, str(work_dir / "setup.py"), "build_ext", "--inplace"], env=env)
+    return sys.exit(cmd.returncode)
 
 
 def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
+
     parser = argparse.ArgumentParser(
         description="Generate and apply stub files from collected type information.",
     )
 
-    subparsers = parser.add_subparsers(title="commands", dest="command")
-
-    translate_parser = subparsers.add_parser(
-        "translate",
-        help="Convert an exported modelx model into Cython sources",
-        description="Convert an exported modelx model into Cython sources",
-    )
-    translate_parser.add_argument(
+    parser.add_argument(
         "model_path",
         type=str,
         help="Path to an exported modelx model to translate into Cython",
     )
-    translate_parser.add_argument(
+
+    parser.add_argument(
+        "--translate-only",
+        action="store_true",
+        default=False,
+        help="Perform translation only (default: False)",
+    )
+
+    parser.add_argument(
         "--paramfile",
         type=str,
         default="parameters.py",
@@ -109,23 +131,36 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
             "Path to a parameter file for setting translation parameters"
         )
     )
-    translate_parser.set_defaults(handler=translate_handler)
-
 
     args = parser.parse_args(argv)
+    translate_handler(args, stdout, stderr)
 
-    handler = getattr(args, "handler", None)
-    if handler is None:
-        parser.print_help(file=stderr)
-        return 1
 
-    try:
-        handler(args, stdout, stderr)
-    except HandlerError as err:
-        print(f"ERROR: {err}", file=stderr)
-        return 1
+def create_setup(work_dir: pathlib.Path, model_name: str, modules: list[str]):
 
-    return 0
+    modules_str = textwrap.indent(",\n".join(
+        ['"' + str(s) + '"' for s in modules]
+    ), " " * 8)
+
+    setup_script = textwrap.dedent("""\
+    import sys
+    from setuptools import setup
+    from Cython.Build import cythonize
+
+    setup(
+        name="{model_name}",
+        ext_modules=cythonize([
+    {modules_str}
+            ],
+            annotate=True
+        )
+    )
+    """)
+
+    (work_dir / "setup.py").write_text(
+        setup_script.format(
+            model_name=model_name,
+            modules_str=modules_str))
 
 
 def entry_point_main():
