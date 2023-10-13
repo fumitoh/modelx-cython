@@ -71,7 +71,7 @@ def translate_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]
     shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
     logger = run_sample(orig_path, model_name)
-    config = ast.literal_eval(pathlib.Path(args.paramfile).read_text())
+    config = ast.literal_eval(pathlib.Path(args.config).read_text())
 
     modules = [model_path / (MX_SYS_MOD + ".py")]
     for m in logger.modules:
@@ -125,11 +125,11 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
     )
 
     parser.add_argument(
-        "--paramfile",
+        "-c", "--config",
         type=str,
-        default="parameters.py",
+        default="config.py",
         help=(
-            "Path to a parameter file for setting translation parameters"
+            "Path to a config file for setting parameters (default: config.py)"
         )
     )
 
