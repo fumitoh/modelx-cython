@@ -11,6 +11,7 @@ from typing import IO, TYPE_CHECKING, List, Optional, Tuple
 
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
+from modelx_cython.config import Conf
 from modelx_cython.transformer import SpaceTransformer
 
 
@@ -85,7 +86,7 @@ def translate_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]
             source=src_path.read_text(),
             type_info=logger.type_info,
             ref_type_info=logger.ref_type_info,
-            config=config["spaces"]
+            config=Conf(config)
         )
         src_path.write_text(trans.transformed.code)
         modules.append(src_path)

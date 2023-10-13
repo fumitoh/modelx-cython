@@ -9,6 +9,7 @@ from libcst._removal_sentinel import RemovalSentinel
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
+from modelx_cython.config import Conf
 from modelx_cython.tracer import TypeInfo, DynamicTypeInfo
 
 from modelx_cython.consts import (
@@ -33,11 +34,12 @@ class LexicalCellsInfo:
     name: str
     params: list[str]
 
-    def __init__(self, module_name, cls_name, name, params) -> None:
+    def __init__(self, module_name, cls_name, name, params, config) -> None:
         self.module_name: str = module_name
         self.cls_name: str = cls_name
         self.name: str = name
         self.params: list[str] = params
+        self.config = config
 
     @property
     def keystr(self):
@@ -53,7 +55,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
     def __init__(self, cellsinfo, typeinfo) -> None:
         super().__init__(
-            cellsinfo.module_name, cellsinfo.cls_name, cellsinfo.name, cellsinfo.params
+            cellsinfo.module_name, cellsinfo.cls_name, cellsinfo.name, cellsinfo.params, cellsinfo.config
         )
         self._typeinfo = typeinfo
 
@@ -67,7 +69,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return self._typeinfo.get_argtype_expr(arg)
 
     def get_rettype_expr(self):
-        if self.has_typeinfo():
+
+        ret_t = self.config.get(Conf.RET_T)
+        if ret_t:
+            return ret_t
+        elif self.has_typeinfo():
             return self._typeinfo.get_rettype_expr()
         else:
             return "object"
@@ -111,9 +117,10 @@ class SpaceAddin:
 class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
-    def __init__(self, module_name, source, type_info: dict, ref_type_info: dict):
+    def __init__(self, module_name, source, config, type_info: dict, ref_type_info: dict):
         super().__init__()
         self.module_name = module_name
+        self.config = config
         self.cells_info = {}
         self.ref_info = {}
         self.space_info = {}
@@ -176,10 +183,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
-                self.get_metadata(
-                    ParentNodeProvider,
-                    self.get_metadata(ParentNodeProvider, original_node),
-                ),
+                self.get_parent(original_node, level=2),
                 cst.ClassDef,
             ).name.value
 
@@ -204,11 +208,14 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
                     + original_node.params.posonly_params
                     if p.name.value != MX_SELF
                 ]
+                config = self.config.get_data(self.module_name + "." + cls_name).get("cells", {}).get(name, {})
+
                 ci = LexicalCellsInfo(
                     module_name=self.module_name,
                     cls_name=cls_name,
                     name=name,
                     params=params,
+                    config=config
                 )
                 self.cells_info[cls_name, name] = CombinedCellsInfo(
                     ci, self.type_info.get(ci.keystr, None)
@@ -226,14 +233,14 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         source: str,
         type_info: dict,
         ref_type_info: dict,
-        config: dict,
+        config: Conf,
     ) -> None:
         super().__init__()
         self.module_name = module_name
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.module = self.wrapper.module
         self.config = config
-        space = SpaceVisitor(module_name, source, type_info, ref_type_info)
+        space = SpaceVisitor(module_name, source, config, type_info, ref_type_info)
         self.cells_info = space.cells_info
         self.ref_info = space.ref_info
         self.space_info = space.space_info
@@ -247,9 +254,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         return self.wrapper.visit(self)
 
     def get_arg_sizes(self, cls_name: str) -> dict[str, int]:
-        space = self.config.get(cls_name[len(SPACE_PREF) :], {})
+        space = self.config.get_data(self.module_name + "." + cls_name)
         params = space.get("cells_params", {})
         return {k: v["size"] for k, v in params.items() if "size" in v}
+
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
         return updated_node.with_changes(

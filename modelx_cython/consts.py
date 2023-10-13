@@ -1,5 +1,6 @@
 FILE_PREF = "_mx_"
 GLOBAL_PREF = "_mx_"
+MODULE_PREF = "_m_"
 SPACE_PREF = "_c_"
 FORMULA_PREF = "_f_"
 VAR_PREF = "_v_"
