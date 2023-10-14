@@ -35,7 +35,7 @@ def increment_backups(
             backup_path.rename(next_backup)
 
 
-def run_sample(model_path: pathlib.Path, new_model_name: str = None) -> MxCallTraceLogger:
+def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None) -> MxCallTraceLogger:
 
     module: str = model_path.name
     try:
@@ -48,7 +48,7 @@ def run_sample(model_path: pathlib.Path, new_model_name: str = None) -> MxCallTr
             logger=logger,
             max_typed_dict_size=0,
             code_filter= MxCodeFilter()):
-            runpy.run_module("sample", run_name="__main__", alter_sys=True)
+            runpy.run_path(sample_path, run_name="__main__")
 
     finally:
         assert sys.path.pop(0) == module_path
@@ -70,26 +70,29 @@ def translate_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]
     shutil.copytree(orig_path, model_path)
     shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
-    logger = run_sample(orig_path, model_name)
+    logger = run_sample(orig_path, args.sample, new_model_name=model_name)
     config = ast.literal_eval(pathlib.Path(args.config).read_text())
 
-    modules = [model_path / (MX_SYS_MOD + ".py")]
+    rel_model_path = model_path.relative_to(model_path.parent)
+
+    modules = [rel_model_path / (MX_SYS_MOD + ".py")]
     for m in logger.modules:
         subs = m.split(".")
         assert subs.pop(0) == model_path.name
         assert subs[-1] in [MX_MODEL_MOD, MX_SPACE_MOD]
         subs[-1] = subs[-1] + ".py"
-        src_path = model_path / "/".join(subs)
+        abs_src_path = model_path / "/".join(subs)
+        rel_src_path = rel_model_path / "/".join(subs)
 
         trans = SpaceTransformer(
             module_name=m, 
-            source=src_path.read_text(),
+            source=abs_src_path.read_text(),
             type_info=logger.type_info,
             ref_type_info=logger.ref_type_info,
             config=Conf(config)
         )
-        src_path.write_text(trans.transformed.code)
-        modules.append(src_path)
+        abs_src_path.write_text(trans.transformed.code)
+        modules.append(rel_src_path)
 
     create_setup(work_dir, model_name, modules=modules)
 
@@ -101,7 +104,8 @@ def compile_main(work_dir: pathlib.Path) -> None:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
-    cmd = subprocess.run([sys.executable, str(work_dir / "setup.py"), "build_ext", "--inplace"], env=env)
+    cmd = subprocess.run([sys.executable, str(work_dir / "setup.py"), "build_ext", "--inplace"],
+                         env=env, cwd=str(work_dir))
     return sys.exit(cmd.returncode)
 
 
@@ -130,6 +134,15 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
         default="config.py",
         help=(
             "Path to a config file for setting parameters (default: config.py)"
+        )
+    )
+
+    parser.add_argument(
+        "-s", "--sample",
+        type=str,
+        default="sample.py",
+        help=(
+            "Path to a sample file to run for collecting type information"
         )
     )
 
