@@ -66,6 +66,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     work_dir = orig_path.parent
     model_name = orig_path.name + "_cy"
     model_path = work_dir / model_name
+    setup_file = pathlib.Path(args.setup) if args.setup else work_dir / "setup.py"
 
     if not args.compile_only:
         increment_backups(model_path)
@@ -95,17 +96,17 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             abs_src_path.write_text(trans.transformed.code)
             modules.append(rel_src_path)
 
-        create_setup(work_dir, model_name, modules=modules)
+        create_setup(model_name, modules=modules, setup_file=setup_file)
 
     if not args.translate_only:
-        return compile_main(work_dir)
+        return compile_main(work_dir, setup_file)
 
 
-def compile_main(work_dir: pathlib.Path) -> None:
+def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> None:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
-    cmd = subprocess.run([sys.executable, str(work_dir / "setup.py"), "build_ext", "--inplace"],
+    cmd = subprocess.run([sys.executable, str(setup_file), "build_ext", "--inplace"],
                          env=env, cwd=str(work_dir))
     return sys.exit(cmd.returncode)
 
@@ -140,6 +141,15 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
         )
     )
 
+    parser.add_argument(
+        "--setup",
+        type=str,
+        default="",
+        help=(
+            "Path to a setup file for Cython (default: setup.py)"
+        )
+    )
+
     group = parser.add_mutually_exclusive_group()
 
     group.add_argument(
@@ -161,7 +171,7 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
     main_handler(args, stdout, stderr)
 
 
-def create_setup(work_dir: pathlib.Path, model_name: str, modules: list[str]):
+def create_setup(model_name: str, modules: list[str], setup_file: pathlib.Path):
 
     modules_str = textwrap.indent(",\n".join(
         ['"' + str(s) + '"' for s in modules]
@@ -182,7 +192,7 @@ def create_setup(work_dir: pathlib.Path, model_name: str, modules: list[str]):
     )
     """)
 
-    (work_dir / "setup.py").write_text(
+    setup_file.write_text(
         setup_script.format(
             model_name=model_name,
             modules_str=modules_str))
