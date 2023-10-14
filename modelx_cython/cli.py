@@ -60,41 +60,42 @@ class HandlerError(Exception):
     pass
 
 
-def translate_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> None:
+def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> None:
 
     orig_path = pathlib.Path(args.model_path).resolve()
     work_dir = orig_path.parent
     model_name = orig_path.name + "_cy"
     model_path = work_dir / model_name
-    increment_backups(model_path)
-    shutil.copytree(orig_path, model_path)
-    shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
-    logger = run_sample(orig_path, args.sample, new_model_name=model_name)
-    config = ast.literal_eval(pathlib.Path(args.config).read_text())
+    if not args.compile_only:
+        increment_backups(model_path)
+        shutil.copytree(orig_path, model_path)
+        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
-    rel_model_path = model_path.relative_to(model_path.parent)
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        config = ast.literal_eval(pathlib.Path(args.config).read_text())
+        rel_model_path = model_path.relative_to(model_path.parent)
 
-    modules = [rel_model_path / (MX_SYS_MOD + ".py")]
-    for m in logger.modules:
-        subs = m.split(".")
-        assert subs.pop(0) == model_path.name
-        assert subs[-1] in [MX_MODEL_MOD, MX_SPACE_MOD]
-        subs[-1] = subs[-1] + ".py"
-        abs_src_path = model_path / "/".join(subs)
-        rel_src_path = rel_model_path / "/".join(subs)
+        modules = [rel_model_path / (MX_SYS_MOD + ".py")]
+        for m in logger.modules:
+            subs = m.split(".")
+            assert subs.pop(0) == model_path.name
+            assert subs[-1] in [MX_MODEL_MOD, MX_SPACE_MOD]
+            subs[-1] = subs[-1] + ".py"
+            abs_src_path = model_path / "/".join(subs)
+            rel_src_path = rel_model_path / "/".join(subs)
 
-        trans = SpaceTransformer(
-            module_name=m, 
-            source=abs_src_path.read_text(),
-            type_info=logger.type_info,
-            ref_type_info=logger.ref_type_info,
-            config=Conf(config)
-        )
-        abs_src_path.write_text(trans.transformed.code)
-        modules.append(rel_src_path)
+            trans = SpaceTransformer(
+                module_name=m, 
+                source=abs_src_path.read_text(),
+                type_info=logger.type_info,
+                ref_type_info=logger.ref_type_info,
+                config=Conf(config)
+            )
+            abs_src_path.write_text(trans.transformed.code)
+            modules.append(rel_src_path)
 
-    create_setup(work_dir, model_name, modules=modules)
+        create_setup(work_dir, model_name, modules=modules)
 
     if not args.translate_only:
         return compile_main(work_dir)
@@ -122,13 +123,6 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
     )
 
     parser.add_argument(
-        "--translate-only",
-        action="store_true",
-        default=False,
-        help="Perform translation only (default: False)",
-    )
-
-    parser.add_argument(
         "-c", "--config",
         type=str,
         default="config.py",
@@ -146,8 +140,25 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
         )
     )
 
+    group = parser.add_mutually_exclusive_group()
+
+    group.add_argument(
+        "--translate-only",
+        action="store_true",
+        default=False,
+        help="Perform translation only (default: False)",
+    )
+
+    group.add_argument(
+        "--compile-only",
+        action="store_true",
+        default=False,
+        help="Perform compilation only (default: False)",
+    )
+
+
     args = parser.parse_args(argv)
-    translate_handler(args, stdout, stderr)
+    main_handler(args, stdout, stderr)
 
 
 def create_setup(work_dir: pathlib.Path, model_name: str, modules: list[str]):
