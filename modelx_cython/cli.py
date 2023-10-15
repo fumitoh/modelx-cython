@@ -60,7 +60,7 @@ class HandlerError(Exception):
     pass
 
 
-def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> None:
+def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> int:
 
     orig_path = pathlib.Path(args.model_path).resolve()
     work_dir = orig_path.parent
@@ -98,17 +98,19 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         create_setup(model_name, modules=modules, setup_file=setup_file)
 
-    if not args.translate_only:
+    if args.translate_only:
+        return 0
+    else:
         return compile_main(work_dir, setup_file)
 
 
-def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> None:
+def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> int:
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
     cmd = subprocess.run([sys.executable, str(setup_file), "build_ext", "--inplace"],
                          env=env, cwd=str(work_dir))
-    return sys.exit(cmd.returncode)
+    return cmd.returncode
 
 
 def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
@@ -168,7 +170,7 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
 
 
     args = parser.parse_args(argv)
-    main_handler(args, stdout, stderr)
+    return main_handler(args, stdout, stderr)
 
 
 def create_setup(model_name: str, modules: list[str], setup_file: pathlib.Path):
