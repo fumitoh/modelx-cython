@@ -1,0 +1,58 @@
+<mxfile host="app.diagrams.net" modified="2023-10-15T05:51:41.784Z" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36" etag="9JhkTjrK_12bTRO2jak2" version="22.0.4" type="device">
+  <diagram name="Page-1" id="8SZw9943Z8kGgJyX-uaQ">
+    <mxGraphModel dx="1086" dy="821" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="tfwosDNgEvmWjt3PSptM-2" value="" style="shape=image;verticalLabelPosition=bottom;labelBackgroundColor=default;verticalAlign=top;aspect=fixed;imageAspect=0;image=https://modelx.io/img/logonav.png;" vertex="1" parent="1">
+          <mxGeometry x="70" y="234.38" width="100" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-12" value="" style="shape=image;verticalLabelPosition=bottom;labelBackgroundColor=default;verticalAlign=top;aspect=fixed;imageAspect=0;image=https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/Cython_logo.svg/880px-Cython_logo.svg.png;" vertex="1" parent="1">
+          <mxGeometry x="596" y="239.38" width="202.04" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-16" value="" style="shape=image;verticalLabelPosition=bottom;labelBackgroundColor=default;verticalAlign=top;aspect=fixed;imageAspect=0;image=https://upload.wikimedia.org/wikipedia/commons/thumb/f/f8/Python_logo_and_wordmark.svg/2880px-Python_logo_and_wordmark.svg.png;" vertex="1" parent="1">
+          <mxGeometry x="259" y="246.88" width="253.53" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-17" value="" style="html=1;shadow=0;dashed=0;align=center;verticalAlign=middle;shape=mxgraph.arrows2.arrow;dy=0.47;dx=30.86;notch=0;fillColor=#86c3ff;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="187" y="263.76" width="60" height="41.24" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-18" value="" style="html=1;shadow=0;dashed=0;align=center;verticalAlign=middle;shape=mxgraph.arrows2.arrow;dy=0.47;dx=30.86;notch=0;fillColor=#86c3ff;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="528" y="263.76" width="60" height="41.24" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-19" value="Pure Python model&lt;br&gt;(a.k.a &quot;nomx&quot; model)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontFamily=Verdana;" vertex="1" parent="1">
+          <mxGeometry x="330" y="321.88" width="160" height="60.62" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-20" value="modelx model" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontFamily=Verdana;" vertex="1" parent="1">
+          <mxGeometry x="60" y="336.38" width="120" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-22" value="Cythonized model" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontFamily=Verdana;" vertex="1" parent="1">
+          <mxGeometry x="588" y="336.38" width="130" height="35.62" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-23" value="" style="shape=image;verticalLabelPosition=bottom;labelBackgroundColor=default;verticalAlign=top;aspect=fixed;imageAspect=0;image=https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/Cython_logo.svg/880px-Cython_logo.svg.png;" vertex="1" parent="1">
+          <mxGeometry x="68" y="460" width="202.04" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-24" value="Cythonized model" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontFamily=Verdana;" vertex="1" parent="1">
+          <mxGeometry x="60" y="557" width="130" height="35.62" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-25" value="" style="shape=image;verticalLabelPosition=bottom;labelBackgroundColor=default;verticalAlign=top;aspect=fixed;imageAspect=0;image=https://upload.wikimedia.org/wikipedia/commons/thumb/3/35/The_C_Programming_Language_logo.svg/1920px-The_C_Programming_Language_logo.svg.png;" vertex="1" parent="1">
+          <mxGeometry x="378" y="460" width="94.5" height="98.7" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-26" value="" style="html=1;shadow=0;dashed=0;align=center;verticalAlign=middle;shape=mxgraph.arrows2.arrow;dy=0.47;dx=30.86;notch=0;fillColor=#86c3ff;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="300" y="484.38" width="60" height="41.24" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-27" value="" style="html=1;shadow=0;dashed=0;align=center;verticalAlign=middle;shape=mxgraph.arrows2.arrow;dy=0.47;dx=30.86;notch=0;fillColor=#86c3ff;strokeColor=none;" vertex="1" parent="1">
+          <mxGeometry x="512.53" y="484.38" width="60" height="41.24" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-28" value=".pyd files (Win)&lt;br style=&quot;font-size: 22px;&quot;&gt;.so files (Linux)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=22;fontFamily=Verdana;" vertex="1" parent="1">
+          <mxGeometry x="588" y="466.93" width="182" height="76.15" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-29" value="C source files" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontFamily=Verdana;" vertex="1" parent="1">
+          <mxGeometry x="378" y="558.7" width="110" height="35.62" as="geometry" />
+        </mxCell>
+        <mxCell id="tfwosDNgEvmWjt3PSptM-30" value="Native code" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=14;fontFamily=Verdana;" vertex="1" parent="1">
+          <mxGeometry x="598" y="557" width="110" height="35.62" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
