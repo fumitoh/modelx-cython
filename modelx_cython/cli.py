@@ -116,7 +116,7 @@ def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> int:
 def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
 
     parser = argparse.ArgumentParser(
-        description="Generate and apply stub files from collected type information.",
+        description="Translate an exported modelx model into Cython and compile it.",
     )
 
     parser.add_argument(
@@ -139,7 +139,7 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
         type=str,
         default="sample.py",
         help=(
-            "Path to a sample file to run for collecting type information"
+            "Path to a sample file to run for collecting type information (default: sample.py)"
         )
     )
 
