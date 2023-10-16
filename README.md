@@ -35,22 +35,20 @@ This will create a Python package named "Model_nomx_cy", next to the original "M
 ## Command
 
 ```
-usage: mx2cy [-h] [-c CONFIG] [-s SAMPLE] [--setup SETUP] [--translate-only | --compile-only] model_path
+usage: mx2cy [-h] [--sample SAMPLE] [--spec SPEC] [--setup SETUP] [--translate-only | --compile-only] model_path
 
 Translate an exported modelx model into Cython and compile it.
 
 positional arguments:
-  model_path            Path to an exported modelx model to translate into Cython
+  model_path        Path to an exported modelx model to translate into Cython
 
 options:
-  -h, --help            show this help message and exit
-  -c CONFIG, --config CONFIG
-                        Path to a config file for setting parameters (default: config.py)
-  -s SAMPLE, --sample SAMPLE
-                        Path to a sample file to run for collecting type information (default: sample.py)
-  --setup SETUP         Path to a setup file for Cython (default: setup.py)
-  --translate-only      Perform translation only (default: False)
-  --compile-only        Perform compilation only (default: False)
+  -h, --help        show this help message and exit
+  --sample SAMPLE   Path to a sample file to run for collecting type information (default: sample.py)
+  --spec SPEC       Path to a spec file for setting parameters (default: spec.py)
+  --setup SETUP     Path to a setup file for Cython (default: setup.py)
+  --translate-only  Perform translation only (default: False)
+  --compile-only    Perform compilation only (default: False)
 ```
 
 ## See Also

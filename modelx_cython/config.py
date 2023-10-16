@@ -7,7 +7,7 @@ from modelx_cython.consts import (
 )
 
 
-class Conf:
+class TranslationSpec:
 
     SPACES = "spaces"
     SPACE_PARAMS = "space_params"
@@ -22,7 +22,7 @@ class Conf:
         
         self._data = data
 
-    def get_data(self, object_path: str):
+    def get_spec(self, object_path: str):
         """
         Examples:
 

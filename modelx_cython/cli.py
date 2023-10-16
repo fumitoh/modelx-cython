@@ -11,7 +11,7 @@ from typing import IO, TYPE_CHECKING, List, Optional, Tuple
 
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
-from modelx_cython.config import Conf
+from modelx_cython.config import TranslationSpec
 from modelx_cython.transformer import SpaceTransformer
 
 
@@ -74,7 +74,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
         logger = run_sample(orig_path, args.sample, new_model_name=model_name)
-        config = ast.literal_eval(pathlib.Path(args.config).read_text())
+        spec = ast.literal_eval(pathlib.Path(args.spec).read_text())
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -91,7 +91,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 source=abs_src_path.read_text(),
                 type_info=logger.type_info,
                 ref_type_info=logger.ref_type_info,
-                config=Conf(config)
+                spec=TranslationSpec(spec)
             )
             abs_src_path.write_text(trans.transformed.code)
             modules.append(rel_src_path)
@@ -126,20 +126,20 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
     )
 
     parser.add_argument(
-        "-c", "--config",
-        type=str,
-        default="config.py",
-        help=(
-            "Path to a config file for setting parameters (default: config.py)"
-        )
-    )
-
-    parser.add_argument(
-        "-s", "--sample",
+        "--sample",
         type=str,
         default="sample.py",
         help=(
             "Path to a sample file to run for collecting type information (default: sample.py)"
+        )
+    )
+
+    parser.add_argument(
+        "--spec",
+        type=str,
+        default="spec.py",
+        help=(
+            "Path to a spec file for setting parameters (default: spec.py)"
         )
     )
 

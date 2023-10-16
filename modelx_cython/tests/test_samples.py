@@ -18,10 +18,10 @@ def test_basicterm_s(copy_samples):
     work_dir = copy_samples / "basicterm_s"    
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
-    subprocess.run(
+    assert subprocess.run(
         ["mx2cy", str(work_dir / "BasicTerm_S_nomx"), 
-         "--config", str(work_dir / "config.py"),
-         "--sample", str(work_dir / "sample.py")], env=env)
+         "--spec", str(work_dir / "spec.py"),
+         "--sample", str(work_dir / "sample.py")], env=env).returncode == 0
     
     assert subprocess.run(
         [sys.executable, str(work_dir / "assert_basicterm_s.py")],
