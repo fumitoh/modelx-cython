@@ -54,7 +54,7 @@ options:
 ## See Also
 
 * [modelx GitHub Repository](https://github.com/fumitoh/modelx)
-* [modelx Dumentation](https://docs.modelx.io)
+* [modelx Documentation](https://docs.modelx.io)
 * [modelx Blog](https://modelx.io/allposts)
 
 ## How to Install
