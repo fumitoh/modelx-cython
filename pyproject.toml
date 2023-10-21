@@ -23,7 +23,7 @@ dependencies = [
     "setuptools",
     "MonkeyType",
 ]
-license = { file = "LICENSE.txt" }
+license = { text = "LGPLv3" }
 
 # See https://pypi.python.org/pypi?%3Aaction=list_classifiers
 classifiers=[
