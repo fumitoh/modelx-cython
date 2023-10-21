@@ -16,7 +16,7 @@ if is_nomx:
 elif is_cy:
     from BasicTerm_S_nomx_cy import BasicTerm_S
 else:
-    raise RuntimeError("Parameter missiong")
+    raise RuntimeError("Parameter missing")
 
 result = {}
 def run_model(m, size):
