@@ -9,7 +9,7 @@ modelx-cython is currently highly experimental and is released only for early ad
 
 modelx-cython is a Python package for cythonizing exported [modelx] models.
 
-![Alt text](./doc/source/images/modelx-ecosystem.png "modelx Ecosystem")
+![modelx Ecosystem](https://github.com/fumitoh/modelx-cython/blob/main/doc/source/images/modelx-ecosystem.png)
 
 ## Usage
 
