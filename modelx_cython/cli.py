@@ -21,7 +21,7 @@ import runpy
 import ast
 import argparse
 import subprocess
-from typing import IO, TYPE_CHECKING, List, Optional, Tuple
+from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
@@ -127,7 +127,7 @@ def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> int:
     return cmd.returncode
 
 
-def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
+def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
 
     parser = argparse.ArgumentParser(
         description="Translate an exported modelx model into Cython and compile it.",
@@ -187,7 +187,7 @@ def main(argv: List[str], stdout: IO[str], stderr: IO[str]) -> int:
     return main_handler(args, stdout, stderr)
 
 
-def create_setup(model_name: str, modules: list[str], setup_file: pathlib.Path):
+def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path):
 
     modules_str = textwrap.indent(",\n".join(
         ['"' + str(s) + '"' for s in modules]
