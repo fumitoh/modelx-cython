@@ -12,7 +12,7 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
-from typing import Union
+from typing import Union, Sequence, Mapping
 try:
     from types import NoneType
 except ImportError: # Python -3.9
@@ -49,13 +49,13 @@ class LexicalCellsInfo:
     module_name: str
     cls_name: str
     name: str
-    params: list[str]
+    params: Sequence[str]
 
     def __init__(self, module_name, cls_name, name, params, spec) -> None:
         self.module_name: str = module_name
         self.cls_name: str = cls_name
         self.name: str = name
-        self.params: list[str] = params
+        self.params: Sequence[str] = params
         self.spec = spec
 
     @property
@@ -101,7 +101,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         else:
             return False
 
-    def get_decltype_expr(self, sizes: dict[str, int], rettype_expr=""):
+    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr=""):
         return self._typeinfo.get_decltype_expr(sizes, rettype_expr=rettype_expr)
 
 
@@ -270,7 +270,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
     def transformed(self):
         return self.wrapper.visit(self)
 
-    def get_arg_sizes(self, cls_name: str) -> dict[str, int]:
+    def get_arg_sizes(self, cls_name: str) -> Mapping[str, int]:
         space = self.spec.get_spec(self.module_name + "." + cls_name)
         params = space.get("cells_params", {})
         return {k: v["size"] for k, v in params.items() if "size" in v}

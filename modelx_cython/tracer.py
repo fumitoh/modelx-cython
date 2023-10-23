@@ -24,7 +24,7 @@ import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
 from types import FrameType
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Mapping, Iterator, Sequence, Optional
 
 import numpy as np
 
@@ -66,10 +66,10 @@ class DynamicTypeInfo:
     name: str
     module: str
     class_: str
-    arg_types: Dict[str, type]  # without self
+    arg_types: Mapping[str, type]  # without self
     ret_type: TypeInfo
 
-    def __init__(self, traces: list[CallTrace]) -> None:
+    def __init__(self, traces: Sequence[CallTrace]) -> None:
         self.name = traces[0].func.__name__
         self.module = traces[0].func.__module__
         self.class_ = ".".join(traces[0].func.__qualname__.split(".")[:-1])
@@ -89,14 +89,14 @@ class DynamicTypeInfo:
         else:
             return val_t
 
-    def is_arrayable(self, sizes: dict[str, int]) -> bool:
+    def is_arrayable(self, sizes: Mapping[str, int]) -> bool:
         return (
             self.has_args()
             and all(t is int for t in self.arg_types.values())
             and set(self.arg_types) == set(sizes)
         )
 
-    def get_decltype_expr(self, sizes: dict[str, int], rettype_expr="") -> str:
+    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="") -> str:
         if not rettype_expr:
             rettype_expr = self.get_rettype_expr()
         return (
@@ -109,8 +109,8 @@ class DynamicTypeInfo:
     def has_args(self):
         return bool(len(self.arg_types))
 
-    def _init_arg_types(self, traces) -> Dict[str, type]:
-        types: Dict[str, list[type]] = {}
+    def _init_arg_types(self, traces) -> Mapping[str, type]:
+        types: Mapping[str, Sequence[type]] = {}
         for trace in traces:
             for arg, typ in itertools.islice(
                 trace.arg_types.items(), 1, None
@@ -121,7 +121,7 @@ class DynamicTypeInfo:
 
         return {arg: self._get_arg_type(typs) for arg, typs in types.items()}
 
-    def _get_arg_type(self, types: list[type]):
+    def _get_arg_type(self, types: Sequence[type]):
         if len(types) == 1:
             return types[0]
         else:
