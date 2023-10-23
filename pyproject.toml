@@ -22,6 +22,7 @@ dependencies = [
     "Cython",
     "setuptools",
     "MonkeyType",
+    "numpy",
 ]
 license = { text = "LGPLv3" }
 
