@@ -355,7 +355,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                 )
                 if is_first:
                     stmt = stmt.with_changes(
-                        leading_lines=stmt.leading_lines + [cst.EmptyLine()]
+                        leading_lines=tuple(stmt.leading_lines) + (cst.EmptyLine(),)
                     )
                     is_first = False
 
@@ -370,7 +370,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                 )
                 if is_first:
                     stmt = stmt.with_changes(
-                        leading_lines=stmt.leading_lines + [cst.EmptyLine()]
+                        leading_lines=tuple(stmt.leading_lines) + (cst.EmptyLine(),)
                     )
                     is_first = False
 
@@ -384,7 +384,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
             if decl_stmts:
                 # Add blank lines below classdef
                 decl_stmts[0] = decl_stmts[0].with_changes(
-                    leading_lines=decl_stmts[0].leading_lines + [cst.EmptyLine()]
+                    leading_lines=tuple(decl_stmts[0].leading_lines) + (cst.EmptyLine(),)
                 )
                 indented_block = cst.ensure_type(
                     updated_node.body, cst.IndentedBlock
