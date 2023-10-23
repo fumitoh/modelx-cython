@@ -225,8 +225,8 @@ class MxCallTracer(CallTracer):
         module: str,
         logger: CallTraceLogger,
         max_typed_dict_size: int,
-        code_filter: CodeFilter | None = None,
-        sample_rate: int | None = None,
+        code_filter: Optional[CodeFilter] = None,
+        sample_rate: Optional[int] = None,
     ) -> None:
         super().__init__(logger, max_typed_dict_size, code_filter, sample_rate)
         self.module = module

@@ -13,7 +13,10 @@
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
 from typing import Union
-from types import NoneType
+try:
+    from types import NoneType
+except ImportError: # Python -3.9
+    NoneType = type(None)
 from dataclasses import dataclass
 import libcst as cst
 from libcst._flatten_sentinel import FlattenSentinel
@@ -289,7 +292,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef
-    ) -> BaseStatement | FlattenSentinel[BaseStatement] | RemovalSentinel:
+    ) -> Union[BaseStatement, FlattenSentinel[BaseStatement], RemovalSentinel]:
         cls_name: str = original_node.name.value
         if cls_name[: len(SPACE_PREF)] == SPACE_PREF and isinstance(
             self.get_metadata(ScopeProvider, original_node), GlobalScope
@@ -352,7 +355,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                 )
                 if is_first:
                     stmt = stmt.with_changes(
-                        leading_lines=stmt.leading_lines + (cst.EmptyLine(),)
+                        leading_lines=stmt.leading_lines + [cst.EmptyLine()]
                     )
                     is_first = False
 
@@ -367,7 +370,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                 )
                 if is_first:
                     stmt = stmt.with_changes(
-                        leading_lines=stmt.leading_lines + (cst.EmptyLine(),)
+                        leading_lines=stmt.leading_lines + [cst.EmptyLine()]
                     )
                     is_first = False
 
@@ -381,7 +384,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
             if decl_stmts:
                 # Add blank lines below classdef
                 decl_stmts[0] = decl_stmts[0].with_changes(
-                    leading_lines=decl_stmts[0].leading_lines + (cst.EmptyLine(),)
+                    leading_lines=decl_stmts[0].leading_lines + [cst.EmptyLine()]
                 )
                 indented_block = cst.ensure_type(
                     updated_node.body, cst.IndentedBlock
