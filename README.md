@@ -65,15 +65,10 @@ To install modelx-cython, run the following command from your command prompt:
 pip install modelx-cython
 ```
 
-If you're on Anaconda, modelx-cython will be available on conda-forge soon.
-For now, you can install it using pip.
-To avoid having modelx-cython install dependent packages from PyPI, install the dependent packages separately, and install modelx-cython with `pip` using the `--no-deps` option.
-Among the dependent packages, aside from modelx, only MonkeyType is not installed by default in most conda environments. 
-So, install it from conda-forge:
+If you're on Anaconda, instead above install it from conda-forge:
 
 ```
-conda install -c conda-forge monkeytype
-pip install --no-deps modelx-cython
+conda install -c conda-forge modelx-cython
 ```
 
 ## Requirements
