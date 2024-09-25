@@ -14,8 +14,13 @@ def copy_samples(tmp_path_factory):
 
 
 def test_basicterm_s(copy_samples):
+    import lifelib
+    import modelx as mx
 
-    work_dir = copy_samples / "basicterm_s"    
+    work_dir = copy_samples / "basicterm_s"
+    lifelib.create('basiclife', work_dir / 'basiclife')
+    mx.read_model(work_dir / 'basiclife' / 'BasicTerm_S').export(work_dir / 'BasicTerm_S_nomx')
+
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
     assert subprocess.run(
