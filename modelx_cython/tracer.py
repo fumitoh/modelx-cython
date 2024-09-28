@@ -54,6 +54,10 @@ from modelx_cython.consts import (
     CY_INT_T,
 )
 
+if sys.version_info >= (3, 12):
+    import opcode
+    RETURN_CONST_OPCODE = opcode.opmap["RETURN_CONST"]
+
 
 @dataclass
 class TypeInfo:
@@ -247,7 +251,11 @@ class MxCallTracer(CallTracer):
             trace.add_yield_type(typ)
             trace.return_value = arg  # Monkeytyped for modelx
         else:
-            if last_opcode == RETURN_VALUE_OPCODE:
+            if sys.version_info >= (3, 12):
+                ret_opcodes = (RETURN_VALUE_OPCODE, RETURN_CONST_OPCODE)
+            else:
+                ret_opcodes = (RETURN_VALUE_OPCODE,)
+            if last_opcode in ret_opcodes:
                 trace.return_type = typ
                 trace.return_value = arg  # Monkeytyped for modelx
             del self.traces[frame]
