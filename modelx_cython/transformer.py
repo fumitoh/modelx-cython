@@ -299,9 +299,13 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         ):
             decl_stmts = []
             for cells in self.cells_info.values():
-                if cells.is_special():
-                    pass
-                elif cells.has_args():
+
+                if cells.cls_name != cls_name:
+                    continue
+                elif cells.is_special():
+                    continue
+
+                if cells.has_args():
                     if cells.is_arrayable(self.get_arg_sizes(cls_name)):
                         decl_stmts.append(
                             cst.parse_statement(
@@ -349,6 +353,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
             is_first = True
             for ref in self.ref_info.values():
+
+                if ref.cls_name != cls_name:
+                    continue
+
                 stmt = cst.parse_statement(
                     f"{ref.name} = {CY_MOD}.declare({ref.type_expr}, visibility='public')",
                     config=self.module.config_for_parsing,
