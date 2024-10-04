@@ -172,7 +172,7 @@ def get_type_expr(typ):
         return CY_INT_T
     elif typ is float:
         return "float"
-    elif type is str:
+    elif typ is str:
         return "str"
     else:
         return "object"
