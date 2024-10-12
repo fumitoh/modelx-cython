@@ -28,7 +28,7 @@ from typing import Any, Mapping, Iterator, Sequence, Optional
 
 import numpy as np
 
-from monkeytype.tracing import (
+from modelx_cython.tracing import (
     CallTraceLogger,
     get_func,
     CodeFilter,
