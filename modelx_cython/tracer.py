@@ -60,18 +60,18 @@ if sys.version_info >= (3, 12):
 
 
 @dataclass
-class TypeInfo:
+class ValueInfo:
     value_type: type
     is_array: bool = False
     ndim: int = 0
 
 
-class DynamicTypeInfo:
+class RuntimeCellsInfo:
     name: str
     module: str
     class_: str
     arg_types: Mapping[str, type]  # without self
-    ret_type: TypeInfo
+    ret_type: ValueInfo
 
     def __init__(self, traces: Sequence[CallTrace]) -> None:
         self.name = traces[0].func.__name__
@@ -152,15 +152,15 @@ class DynamicTypeInfo:
     @staticmethod
     def get_value_type(value):
         if isinstance(value, np.ndarray):
-            return TypeInfo(
+            return ValueInfo(
                 normalize_type(value.dtype.type), is_array=True, ndim=value.ndim
             )
         else:
-            return TypeInfo(normalize_type(type(value)))
+            return ValueInfo(normalize_type(type(value)))
 
 
 @dataclass
-class RefTypeInfo:
+class RuntimeRefInfo:
     type_expr: str
 
     def __init__(self, value):
@@ -203,22 +203,22 @@ def coerce_type(lt: type, rt: type):
         object
 
 
-def comp_and_get_type(lt: TypeInfo, rt: TypeInfo) -> TypeInfo:
+def comp_and_get_type(lt: ValueInfo, rt: ValueInfo) -> ValueInfo:
     assert lt != rt  # must be different types
 
     if lt.is_array and rt.is_array:
         if lt.ndim == rt.ndim:
-            return TypeInfo(
+            return ValueInfo(
                 coerce_type(lt.value_type, rt.value_type), is_array=True, ndim=lt.ndim
             )
         else:
-            TypeInfo(object)
+            ValueInfo(object)
 
     elif not lt.is_array and not lt.is_array:  # both are non-array
-        return TypeInfo(coerce_type(lt.value_type, rt.value_type))
+        return ValueInfo(coerce_type(lt.value_type, rt.value_type))
 
     else:  # lt or rt is array
-        return TypeInfo(object)
+        return ValueInfo(object)
 
 
 class MxCallTracer(CallTracer):
@@ -330,7 +330,7 @@ class MxCallTraceLogger(CallTraceLogger):
 
     def flush(self) -> None:
         for k, v in self._traces.items():
-            self.type_info[k] = info = DynamicTypeInfo(v)
+            self.type_info[k] = info = RuntimeCellsInfo(v)
             if info.module not in self.modules:
                 self.modules.append(info.module)
         self._traces.clear()
@@ -339,7 +339,7 @@ class MxCallTraceLogger(CallTraceLogger):
             for name, value in v.items():
                 names = k.split(".")
                 assert names[-1] == MX_ASSIGN_REFS
-                self.ref_type_info[".".join(names[:-1] + [name])] = RefTypeInfo(value)
+                self.ref_type_info[".".join(names[:-1] + [name])] = RuntimeRefInfo(value)
         self.members.clear()
 
         if self.new_name:

@@ -27,7 +27,7 @@ import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
 from modelx_cython.config import TranslationSpec
-from modelx_cython.tracer import TypeInfo, DynamicTypeInfo
+from modelx_cython.tracer import RuntimeCellsInfo
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -68,22 +68,22 @@ class LexicalCellsInfo:
 
 
 class CombinedCellsInfo(LexicalCellsInfo):
-    _typeinfo: DynamicTypeInfo
+    _runtime_info: RuntimeCellsInfo
 
     def __init__(self, cellsinfo, typeinfo) -> None:
         super().__init__(
             cellsinfo.module_name, cellsinfo.cls_name, cellsinfo.name, cellsinfo.params, cellsinfo.spec
         )
-        self._typeinfo = typeinfo
+        self._runtime_info = typeinfo
 
     def has_typeinfo(self):
-        return bool(self._typeinfo)
+        return bool(self._runtime_info)
 
     def has_args(self):
         return bool(self.params)
 
     def get_argtype_expr(self, arg: str) -> str:
-        return self._typeinfo.get_argtype_expr(arg)
+        return self._runtime_info.get_argtype_expr(arg)
 
     def get_rettype_expr(self):
 
@@ -91,22 +91,22 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if ret_t:
             return ret_t
         elif self.has_typeinfo():
-            return self._typeinfo.get_rettype_expr()
+            return self._runtime_info.get_rettype_expr()
         else:
             return "object"
 
     def is_arrayable(self, sizes):
         if self.has_typeinfo():
-            return self._typeinfo.is_arrayable(sizes)
+            return self._runtime_info.is_arrayable(sizes)
         else:
             return False
 
     def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr=""):
-        return self._typeinfo.get_decltype_expr(sizes, rettype_expr=rettype_expr)
+        return self._runtime_info.get_decltype_expr(sizes, rettype_expr=rettype_expr)
 
 
 @dataclass
-class RefInfo:
+class LexicalRefInfo:
     module_name: str
     cls_name: str
     name: str
@@ -187,7 +187,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
             ref_type_info = self.ref_type_info.get(
                 self.module_name + "." + cls_name + "." + name, None
             )
-            self.ref_info[self.module_name, cls_name, name] = RefInfo(
+            self.ref_info[self.module_name, cls_name, name] = LexicalRefInfo(
                 self.module_name,
                 cls_name,
                 name,
