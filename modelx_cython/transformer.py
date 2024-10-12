@@ -134,15 +134,15 @@ class SpaceAddin:
 class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
-    def __init__(self, module_name, source, spec, type_info: dict, ref_type_info: dict):
+    def __init__(self, module_name, source, spec, cells_info: dict, ref_info: dict):
         super().__init__()
         self.module_name = module_name
         self.spec = spec
         self.cells_info = {}
         self.ref_info = {}
         self.space_info = {}
-        self.type_info = type_info
-        self.ref_type_info = ref_type_info
+        self._rt_cells_info = cells_info
+        self._rt_ref_info = ref_info
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
 
@@ -184,14 +184,14 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
             except Exception:   # igonore other than assignments, such as 'pass'
                 return
 
-            ref_type_info = self.ref_type_info.get(
+            rt_info = self._rt_ref_info.get(
                 self.module_name + "." + cls_name + "." + name, None
             )
             self.ref_info[self.module_name, cls_name, name] = LexicalRefInfo(
                 self.module_name,
                 cls_name,
                 name,
-                ref_type_info.type_expr if ref_type_info else None,
+                rt_info.type_expr if rt_info else None,
             )
 
     @m.call_if_inside(m.ClassDef())
@@ -235,7 +235,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
                     spec=spec
                 )
                 self.cells_info[cls_name, name] = CombinedCellsInfo(
-                    ci, self.type_info.get(ci.keystr, None)
+                    ci, self._rt_cells_info.get(ci.keystr, None)
                 )
 
         return False
@@ -248,8 +248,8 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         self,
         module_name: str,
         source: str,
-        type_info: dict,
-        ref_type_info: dict,
+        cells_info: dict,
+        ref_info: dict,
         spec: TranslationSpec,
     ) -> None:
         super().__init__()
@@ -257,7 +257,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.module = self.wrapper.module
         self.spec = spec
-        space = SpaceVisitor(module_name, source, spec, type_info, ref_type_info)
+        space = SpaceVisitor(module_name, source, spec, cells_info, ref_info)
         self.cells_info = space.cells_info
         self.ref_info = space.ref_info
         self.space_info = space.space_info

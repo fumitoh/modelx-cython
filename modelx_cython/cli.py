@@ -103,8 +103,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             trans = SpaceTransformer(
                 module_name=m, 
                 source=abs_src_path.read_text(),
-                type_info=logger.type_info,
-                ref_type_info=logger.ref_type_info,
+                cells_info=logger.cells_info,
+                ref_info=logger.ref_info,
                 spec=TranslationSpec(spec)
             )
             abs_src_path.write_text(trans.transformed.code)

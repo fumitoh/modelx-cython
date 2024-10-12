@@ -261,7 +261,7 @@ class MxCallTracer(CallTracer):
             del self.traces[frame]
             self.logger.log(trace)
             if trace.func.__name__ == MX_ASSIGN_REFS:
-                self.logger.members[trace.funcname] = {
+                self.logger.refs[trace.funcname] = {
                     k: v
                     for k, v in frame.f_locals[MX_SELF].__dict__.items()
                     if is_user_defined(k)
@@ -319,9 +319,9 @@ class MxCallTraceLogger(CallTraceLogger):
         super().__init__()
         self.new_name = new_model_name
         self._traces = {}  # funcname -> [trace]
-        self.members = {}  # (module, qualname) -> value
-        self.type_info = {}  # funcname -> MethodTypeInfo
-        self.ref_type_info = {}
+        self.refs = {}  # (module, qualname) -> value
+        self.cells_info = {}  # funcname -> MethodTypeInfo
+        self.ref_info = {}
         self.modules = []
 
     def log(self, trace: CallTrace) -> None:
@@ -330,17 +330,17 @@ class MxCallTraceLogger(CallTraceLogger):
 
     def flush(self) -> None:
         for k, v in self._traces.items():
-            self.type_info[k] = info = RuntimeCellsInfo(v)
+            self.cells_info[k] = info = RuntimeCellsInfo(v)
             if info.module not in self.modules:
                 self.modules.append(info.module)
         self._traces.clear()
 
-        for k, v in self.members.items():
+        for k, v in self.refs.items():
             for name, value in v.items():
                 names = k.split(".")
                 assert names[-1] == MX_ASSIGN_REFS
-                self.ref_type_info[".".join(names[:-1] + [name])] = RuntimeRefInfo(value)
-        self.members.clear()
+                self.ref_info[".".join(names[:-1] + [name])] = RuntimeRefInfo(value)
+        self.refs.clear()
 
         if self.new_name:
             self._change_model_name()
@@ -356,13 +356,13 @@ class MxCallTraceLogger(CallTraceLogger):
         for i, v in enumerate(self.modules):
             self.modules[i] = replace_first_name(v, self.new_name)
 
-        for key in list(self.type_info.keys()):
-            v = self.type_info.pop(key)
+        for key in list(self.cells_info.keys()):
+            v = self.cells_info.pop(key)
             v.module = replace_first_name(v.module, self.new_name)
-            self.type_info[replace_first_name(key, self.new_name)] = v
+            self.cells_info[replace_first_name(key, self.new_name)] = v
 
-        for key in list(self.ref_type_info.keys()):
-            self.ref_type_info[replace_first_name(key, self.new_name)] = self.ref_type_info.pop(key)
+        for key in list(self.ref_info.keys()):
+            self.ref_info[replace_first_name(key, self.new_name)] = self.ref_info.pop(key)
 
 
 
