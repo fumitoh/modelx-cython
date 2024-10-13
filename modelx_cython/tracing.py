@@ -24,7 +24,37 @@ from monkeytype.util import get_func_fqname
 logger = logging.getLogger(__name__)
 
 
-class CallTrace:
+class CallTrace:    # Replaced CallTrace
+    """CallTrace contains the values observed during a single invocation of a function"""
+
+    def __init__(
+        self,
+        func: Callable[..., Any],
+        arg_vals: Dict[str, Any],
+        loc_vals: Optional[Dict[str, Any]] = None,
+        ret_val: Optional[Any] = None,
+        yield_val: Optional[Any] = None,
+    ) -> None:
+        """
+        Args:
+            func: The function where the trace occurred
+            arg_vals: The collected argument values
+            ret_val: The collected return value. This will be None if the called function returns
+                due to an unhandled exception.
+            yield_val: The collected yield value. Should not be relevant in modelx
+        """
+        self.func = func
+        self.arg_vals = arg_vals
+        self.loc_vals = loc_vals
+        self.ret_val = ret_val
+        self.yield_val = yield_val
+
+    @property
+    def funcname(self) -> str:
+        return get_func_fqname(self.func)
+
+
+class xCallTrace:   # Original CallTrace
     """CallTrace contains the types observed during a single invocation of a function"""
 
     def __init__(

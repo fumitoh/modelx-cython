@@ -19,12 +19,13 @@
 
 import sys
 import pathlib
+import random
 import numbers
 import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
 from types import FrameType
-from typing import Any, Mapping, Iterator, Sequence, Optional
+from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 
 import numpy as np
 
@@ -114,11 +115,12 @@ class RuntimeCellsInfo:
         return bool(len(self.arg_types))
 
     def _init_arg_types(self, traces) -> Mapping[str, type]:
-        types: Mapping[str, Sequence[type]] = {}
+        types: Dict[str, List[type]] = {}
         for trace in traces:
-            for arg, typ in itertools.islice(
-                trace.arg_types.items(), 1, None
+            for arg, val in itertools.islice(
+                trace.arg_vals.items(), 1, None
             ):  # remove self
+                typ = get_type(val, max_typed_dict_size=0)
                 typs = types.setdefault(arg, [])
                 if typ not in typs:
                     typs.append(typ)
@@ -137,7 +139,7 @@ class RuntimeCellsInfo:
     def _init_ret_type(self, traces):
         ret_types = []
         for tr in traces:
-            ret_type = self.get_value_type(tr.return_value)
+            ret_type = self.get_value_type(tr.ret_val)
             if ret_type not in ret_types:
                 ret_types.append(ret_type)
 
@@ -235,6 +237,26 @@ class MxCallTracer(CallTracer):
         super().__init__(logger, max_typed_dict_size, code_filter, sample_rate)
         self.module = module
 
+    def handle_call(self, frame: FrameType) -> None:
+        if self.sample_rate and random.randrange(self.sample_rate) != 0:
+            return
+        func = self._get_func(frame)
+        if func is None:
+            return
+        code = frame.f_code
+        # I can't figure out a way to access the value sent to a generator via
+        # send() from a stack frame.
+        if frame in self.traces:
+            # resuming a generator; we've already seen this frame
+            return
+        arg_names = code.co_varnames[0: code.co_argcount]
+        arg_vals = {}
+        for name in arg_names:
+            if name in frame.f_locals:
+                arg_vals[name] = frame.f_locals[name]
+
+        self.traces[frame] = CallTrace(func, arg_vals)
+
     def handle_return(self, frame: FrameType, arg: Any) -> None:
         # In the case of a 'return' event, arg contains the return value, or
         # None, if the block returned because of an unhandled exception. We
@@ -242,30 +264,29 @@ class MxCallTracer(CallTracer):
         # from a function returning (or yielding) None. In the latter case, the
         # the last instruction that was executed should always be a return or a
         # yield.
-        typ = get_type(arg, max_typed_dict_size=self.max_typed_dict_size)
         last_opcode = frame.f_code.co_code[frame.f_lasti]
         trace = self.traces.get(frame)
         if trace is None:
             return
         elif last_opcode == YIELD_VALUE_OPCODE:
-            trace.add_yield_type(typ)
-            trace.return_value = arg  # Monkeytyped for modelx
+            trace.ret_val = arg
         else:
             if sys.version_info >= (3, 12):
                 ret_opcodes = (RETURN_VALUE_OPCODE, RETURN_CONST_OPCODE)
             else:
                 ret_opcodes = (RETURN_VALUE_OPCODE,)
             if last_opcode in ret_opcodes:
-                trace.return_type = typ
-                trace.return_value = arg  # Monkeytyped for modelx
+                trace.ret_val = arg
             del self.traces[frame]
-            self.logger.log(trace)
+
             if trace.func.__name__ == MX_ASSIGN_REFS:
                 self.logger.refs[trace.funcname] = {
                     k: v
                     for k, v in frame.f_locals[MX_SELF].__dict__.items()
                     if is_user_defined(k)
                 }
+            else:
+                self.logger.log(trace)
 
     def __call__(self, frame: FrameType, event: str, arg: Any) -> "CallTracer":
         code = frame.f_code
@@ -299,8 +320,8 @@ class MxCodeFilter:
     def __call__(self, code):
         # Since called many times, check module name and function name only
         if (
-            code.co_filename[-len(MX_MODEL_MOD) - 3 : -3] == MX_MODEL_MOD
-            or code.co_filename[-len(MX_SPACE_MOD) - 3 : -3] == MX_SPACE_MOD
+            code.co_filename[-len(MX_MODEL_MOD) - 3: -3] == MX_MODEL_MOD
+            or code.co_filename[-len(MX_SPACE_MOD) - 3: -3] == MX_SPACE_MOD
         ):
             if code.co_name[:3] == FORMULA_PREF:
                 return True
