@@ -1,3 +1,6 @@
+# Modified from https://github.com/Instagram/MonkeyType/blob/v23.3.0/monkeytype/tracing.py
+# See LICENSES/LICENSE_MONKEYTYPE.txt
+
 # Copyright (c) 2017-present, Facebook, Inc.
 # All rights reserved.
 #
