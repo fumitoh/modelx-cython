@@ -38,7 +38,6 @@ from modelx_cython.tracing import (
     RETURN_VALUE_OPCODE,
     YIELD_VALUE_OPCODE,
     SUPPORTED_EVENTS,
-    logger,
     EVENT_CALL,
     EVENT_RETURN,
 )
@@ -163,9 +162,11 @@ class RuntimeCellsInfo:
 
 @dataclass
 class RuntimeRefInfo:
+    logger: 'MxCallTraceLogger'
     type_expr: str
 
-    def __init__(self, value):
+    def __init__(self, logger, value):
+        self.logger = logger
         self.type_expr = get_type_expr(type(value))
 
 
@@ -340,7 +341,7 @@ class MxCallTraceLogger(CallTraceLogger):
         super().__init__()
         self.new_name = new_model_name
         self._traces = {}  # funcname -> [trace]
-        self.refs = {}  # (module, qualname) -> value
+        self.refs = {}  # full qualified name -> {name: value}
         self.cells_info = {}  # funcname -> MethodTypeInfo
         self.ref_info = {}
         self.modules = []
@@ -356,17 +357,18 @@ class MxCallTraceLogger(CallTraceLogger):
                 self.modules.append(info.module)
         self._traces.clear()
 
-        for k, v in self.refs.items():
-            for name, value in v.items():
+        for k, refs in self.refs.items():
+            for name, value in refs.items():
                 names = k.split(".")
                 assert names[-1] == MX_ASSIGN_REFS
-                self.ref_info[".".join(names[:-1] + [name])] = RuntimeRefInfo(value)
+                fqname = ".".join(names[:-1] + [name])
+                self.ref_info[fqname] = RuntimeRefInfo(self, value)
         self.refs.clear()
 
         if self.new_name:
-            self._change_model_name()
+            self._update_model_name()
 
-    def _change_model_name(self):
+    def _update_model_name(self):
         """Change the model name stored in members"""
 
         def replace_first_name(dotted_name: str, name: str):

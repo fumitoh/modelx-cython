@@ -7,7 +7,6 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 import inspect
-import logging
 import random
 import sys
 from abc import ABCMeta, abstractmethod
@@ -21,10 +20,8 @@ from monkeytype.compat import cached_property
 from monkeytype.typing import get_type
 from monkeytype.util import get_func_fqname
 
-logger = logging.getLogger(__name__)
 
-
-class CallTrace:    # Replaced CallTrace
+class CallTrace:    # Updated CallTrace
     """CallTrace contains the values observed during a single invocation of a function"""
 
     def __init__(
