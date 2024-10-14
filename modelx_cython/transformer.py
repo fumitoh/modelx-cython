@@ -36,6 +36,7 @@ from modelx_cython.consts import (
     VAR_PREF,
     HAS_PREF,
     SPACE_PREF,
+    MODULE_PREF,
     MX_SELF,
     MX_SYS_MOD,
     CY_BOOL_T,
@@ -59,7 +60,7 @@ class LexicalCellsInfo:
         self.spec = spec
 
     @property
-    def keystr(self):
+    def fqname(self):
         pref = "" if self.is_special() else FORMULA_PREF
         return self.module_name + "." + self.cls_name + "." + pref + self.name
 
@@ -125,7 +126,7 @@ class SpaceAddin:
     
     def is_space_scope(self, node, level=0):
         scope = self.get_scope(node, level)
-        return  bool(
+        return bool(
             isinstance(scope, ClassScope)
             and scope.name[: len(SPACE_PREF)] == SPACE_PREF
             and isinstance(scope.parent, GlobalScope)
@@ -140,7 +141,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
         self.spec = spec
         self.cells_info = {}
         self.ref_info = {}
-        self.space_info = {}
+        self.spaces = {}    # Parent class name to list of child space names
         self._rt_cells_info = cells_info
         self._rt_ref_info = ref_info
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
@@ -152,15 +153,24 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     @m.leave(m.SimpleStatementLine())
     def collect_space_info(self, original_node):
         if self.is_space_scope(original_node, level=2):
+            # SimpleStatement in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
             node = original_node
+
+            # Retrieve class node
+            cls_node = original_node
+            for _ in range(4):
+                cls_node = self.get_metadata(ParentNodeProvider, cls_node)
+            cls_name = cst.ensure_type(cls_node, cst.ClassDef).name.value
 
             try:
                 target = cst.ensure_type(node.body[0], cst.Assign).targets[0].target
             except Exception:
                 return
-            
+
+            # Assuming all member assignments in __init__ to names without prefix "_" are child spaces
+            # TODO: Rewrite to a robuster condition. Make modelx.export output child space list
             if (target.value.value == MX_SELF and is_user_defined(target.attr.value)):
-                self.space_info[target.attr.value] = self.wrapper.module.code_for_node(node.body[0].value)
+                self.spaces.setdefault(cls_name, []).append(target.attr.value)
 
     @m.call_if_inside(m.ClassDef())
     @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_ASSIGN_REFS)))
@@ -168,13 +178,13 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     def collect_refs_info(self, original_node):
 
         if self.is_space_scope(original_node, level=2):
-            # SimpleStatemetn in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
+            # SimpleStatement in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
 
-            node = original_node
+            # Retrieve class node
+            cls_node = original_node
             for _ in range(4):
-                node = self.get_metadata(ParentNodeProvider, node)
-
-            cls_name = cst.ensure_type(node, cst.ClassDef).name.value
+                cls_node = self.get_metadata(ParentNodeProvider, cls_node)
+            cls_name = cst.ensure_type(cls_node, cst.ClassDef).name.value
 
             try:
                 name = cst.ensure_type(
@@ -235,7 +245,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
                     spec=spec
                 )
                 self.cells_info[cls_name, name] = CombinedCellsInfo(
-                    ci, self._rt_cells_info.get(ci.keystr, None)
+                    ci, self._rt_cells_info.get(ci.fqname, None)
                 )
 
         return False
@@ -260,7 +270,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         space = SpaceVisitor(module_name, source, spec, cells_info, ref_info)
         self.cells_info = space.cells_info
         self.ref_info = space.ref_info
-        self.space_info = space.space_info
+        self.spaces = space.spaces
 
     @property
     def package(self) -> str:
@@ -300,7 +310,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
             decl_stmts = []
             for cells in self.cells_info.values():
 
-                if cells.cls_name != cls_name:
+                if cells.module_name != self.module_name or cells.cls_name != cls_name:
                     continue
                 elif cells.is_special():
                     continue
@@ -354,7 +364,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
             is_first = True
             for ref in self.ref_info.values():
 
-                if ref.cls_name != cls_name:
+                if ref.module_name != self.module_name or ref.cls_name != cls_name:
                     continue
 
                 stmt = cst.parse_statement(
@@ -370,10 +380,13 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                 decl_stmts.append(stmt)
 
             is_first = True
-            for space in self.space_info.keys():
+            for space in self.spaces.get(cls_name, []):
+
+                mod_name = MODULE_PREF + cls_name[len(SPACE_PREF):]  # Replace prefix for submodule
+                rel_path = mod_name + "." + SPACE_PREF + space
 
                 stmt = cst.parse_statement(
-                    f"{space} = {CY_MOD}.declare('object', visibility='public')",
+                    f"{space} = {CY_MOD}.declare(object, visibility='public')",
                     config=self.module.config_for_parsing,
                 )
                 if is_first:
