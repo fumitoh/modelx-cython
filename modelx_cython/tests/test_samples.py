@@ -7,17 +7,19 @@ import pytest
 
 
 @pytest.fixture
-def copy_samples(tmp_path_factory):
-    dst = tmp_path_factory.mktemp("temp") / "samples"
-    shutil.copytree(pathlib.Path(__file__).parent / "samples", dst)
+def copy_sample(tmp_path_factory, request):
+    sample_dir = request.node.get_closest_marker("sample_dir").args[0]
+    dst = tmp_path_factory.mktemp("temp") / "samples" / sample_dir
+    shutil.copytree(pathlib.Path(__file__).parent / "samples" / sample_dir, dst)
     return dst
 
+@pytest.mark.sample_dir("basicterm_s")
 @pytest.mark.parametrize("target", ["mx2cy", "main"])
-def test_mx2cy_with_basicterm_s(copy_samples, target):
+def test_mx2cy_with_basicterm_s(copy_sample, target):
     import lifelib
     import modelx as mx
 
-    work_dir = copy_samples / "basicterm_s"
+    work_dir = copy_sample # / "basicterm_s"
     lifelib.create('basiclife', work_dir / 'basiclife')
     mx.read_model(work_dir / 'basiclife' / 'BasicTerm_S').export(work_dir / 'BasicTerm_S_nomx')
 
@@ -35,6 +37,35 @@ def test_mx2cy_with_basicterm_s(copy_samples, target):
         assert main(argv[1:], sys.stdout, sys.stderr) == 0
     
     assert subprocess.run(
-        [sys.executable, str(work_dir / "assert_basicterm_s.py")],
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env
+    ).returncode == 0
+
+
+
+@pytest.mark.sample_dir("ref_space")
+@pytest.mark.parametrize("target", ["mx2cy", "main"])
+def test_mx2cy_with_ref_space(copy_sample, target):
+    import modelx as mx
+
+    work_dir = copy_sample
+    mx.read_model(work_dir / 'RefSpace').export(work_dir / 'RefSpace_nomx')
+    del mx.get_models()["RefSpace"]
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
+
+    argv = ["mx2cy", str(work_dir / "RefSpace_nomx"),
+            "--spec", str(work_dir / "spec.py"),
+            "--sample", str(work_dir / "sample.py")]
+
+    if target == "mx2cy":
+        assert subprocess.run(argv, env=env).returncode == 0
+    elif target == "main":
+        from modelx_cython.cli import main
+        assert main(argv[1:], sys.stdout, sys.stderr) == 0
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
         env=env
     ).returncode == 0
