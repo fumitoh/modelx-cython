@@ -15,3 +15,11 @@ def qux():
     return 4
 
 
+def corge():
+    return foo.foo()
+
+
+# ---------------------------------------------------------------------------
+# References
+
+foo = ("Interface", ("...", "Foo"), "auto")
