@@ -80,14 +80,14 @@ class RuntimeCellsInfo:
         self.arg_types = self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
 
-    def get_argtype_expr(self, arg: str) -> str:
+    def get_argtype_expr(self, arg: str, with_module=True, use_double=False) -> str:
         if arg in self.arg_types:
-            return get_type_expr(self.arg_types[arg])
+            return get_type_expr(self.arg_types[arg], with_module=with_module, use_double=use_double)
         else:
             return ""
 
-    def get_rettype_expr(self) -> str:
-        val_t = get_type_expr(self.ret_type.value_type)
+    def get_rettype_expr(self, with_module=True, use_double=False) -> str:
+        val_t = get_type_expr(self.ret_type.value_type, with_module=with_module, use_double=use_double)
         if self.ret_type.ndim:
             return val_t + "[" + ", ".join(":" * self.ret_type.ndim) + "]"
         else:
@@ -100,9 +100,9 @@ class RuntimeCellsInfo:
             and set(self.arg_types) == set(sizes)
         )
 
-    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="") -> str:
+    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", with_module=True, use_double=False) -> str:
         if not rettype_expr:
-            rettype_expr = self.get_rettype_expr()
+            rettype_expr = self.get_rettype_expr(with_module=with_module, use_double=use_double)
         return (
             rettype_expr
             + "["
@@ -167,14 +167,24 @@ class RuntimeRefInfo:
 
     def __init__(self, logger, value):
         self.logger = logger
-        self.type_expr = get_type_expr(type(value))
+        self.type_ = type(value)
 
 
-def get_type_expr(typ):
+def get_type_expr(typ, with_module=True, use_double=False):
     if typ is int:
-        return CY_INT_T
+        if with_module:
+            return f"{CY_MOD}.{CY_INT_T}"
+        else:
+            return CY_INT_T
     elif typ is float:
-        return "float"
+        if use_double:
+            if with_module:
+                return f"{CY_MOD}.double"
+            else:
+                return "double"
+        else:
+            return "float"
+
     elif typ is str:
         return "str"
     else:

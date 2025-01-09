@@ -18,6 +18,8 @@ try:
 except ImportError: # Python -3.9
     NoneType = type(None)
 from dataclasses import dataclass
+import textwrap
+from functools import cached_property
 import libcst as cst
 from libcst._flatten_sentinel import FlattenSentinel
 from libcst._nodes.module import Module
@@ -27,7 +29,7 @@ import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
 from modelx_cython.config import TranslationSpec
-from modelx_cython.tracer import RuntimeCellsInfo
+from modelx_cython.tracer import RuntimeCellsInfo, get_type_expr
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -39,6 +41,7 @@ from modelx_cython.consts import (
     MODULE_PREF,
     MX_SELF,
     MX_SYS_MOD,
+    MX_SPACE_MOD,
     CY_BOOL_T,
     MX_ASSIGN_REFS,
     MX_COPY_REFS,
@@ -83,16 +86,16 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def has_args(self):
         return bool(self.params)
 
-    def get_argtype_expr(self, arg: str) -> str:
-        return self._runtime_info.get_argtype_expr(arg)
+    def get_argtype_expr(self, arg: str, with_module=True, use_double=False) -> str:
+        return self._runtime_info.get_argtype_expr(arg, with_module=with_module, use_double=use_double)
 
-    def get_rettype_expr(self):
+    def get_rettype_expr(self, with_module=True, use_double=False):
 
         ret_t = self.spec.get(TranslationSpec.RET_T)
         if ret_t:
             return ret_t
         elif self.has_typeinfo():
-            return self._runtime_info.get_rettype_expr()
+            return self._runtime_info.get_rettype_expr(with_module=with_module, use_double=use_double)
         else:
             return "object"
 
@@ -102,8 +105,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         else:
             return False
 
-    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr=""):
-        return self._runtime_info.get_decltype_expr(sizes, rettype_expr=rettype_expr)
+    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", with_module=True, use_double=False):
+        return self._runtime_info.get_decltype_expr(sizes, rettype_expr=rettype_expr, with_module=with_module, use_double=use_double)
 
 
 @dataclass
@@ -111,7 +114,7 @@ class LexicalRefInfo:
     module_name: str
     cls_name: str
     name: str
-    type_expr: Union[str, NoneType]
+    type_: type
 
 class SpaceAddin:
 
@@ -138,15 +141,22 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     def __init__(self, module_name, source, spec, cells_info: dict, ref_info: dict):
         super().__init__()
         self.module_name = module_name
+        self.source = source
         self.spec = spec
         self.cells_info = {}
         self.ref_info = {}
+        self.classes = []
         self.spaces = {}    # Parent class name to list of child space names
         self._rt_cells_info = cells_info
         self._rt_ref_info = ref_info
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
 
+    @m.leave(m.ClassDef())
+    def collect_classes(self, original_node):
+        name = original_node.name.value
+        if name[:len(SPACE_PREF)] == SPACE_PREF:
+            self.classes.append(name)
 
     @m.call_if_inside(m.ClassDef())
     @m.call_if_inside(m.FunctionDef(name=cst.Name("__init__")))
@@ -201,7 +211,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
                 self.module_name,
                 cls_name,
                 name,
-                rt_info.type_expr if rt_info else None,
+                rt_info.type_ if rt_info else None,
             )
 
     @m.call_if_inside(m.ClassDef())
@@ -244,11 +254,212 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
                     params=params,
                     spec=spec
                 )
-                self.cells_info[cls_name, name] = CombinedCellsInfo(
+                self.cells_info.setdefault(cls_name, {})[name] = CombinedCellsInfo(
                     ci, self._rt_cells_info.get(ci.fqname, None)
                 )
 
         return False
+
+
+class PXDGenerator:
+
+    pxd_template = textwrap.dedent("""\
+    from {package} cimport {MX_SYS_MOD}
+    {child_cimports}
+
+    {class_defs}
+    """)
+
+    cls_template = textwrap.dedent("""\
+    cdef class {class_name}({MX_SYS_MOD}.BaseSpace):
+
+    {private_var_defs}
+    {public_var_defs}
+
+        cpdef {MX_COPY_REFS}({class_name} self, object base, object base_root)
+
+    {private_meth_defs}
+    {public_meth_defs}
+    """)
+
+    def __init__(self, visitor: SpaceVisitor):
+        self.module_name = visitor.module_name
+        self.classes = visitor.classes
+        self.cells_info = visitor.cells_info
+        self.ref_info = visitor.ref_info
+        self.spaces = visitor.spaces
+        self.spec = visitor.spec
+
+    @cached_property
+    def package(self) -> str:
+        return self.module_name.split(".")[0]
+
+    @cached_property
+    def code(self):
+        return self.pxd_template.format(
+            package=self.package,
+            MX_SYS_MOD=MX_SYS_MOD,
+            child_cimports=self.child_cimports,
+            class_defs=self.class_defs
+        )
+
+    @cached_property
+    def class_defs(self):
+        stmts = []
+        for cls in self.classes:
+            stmts.append(self.a_class_def(cls))
+        return "\n\n".join(stmts)
+
+    def a_class_def(self, name):
+        return self.cls_template.format(
+            class_name=name,
+            MX_SYS_MOD=MX_SYS_MOD,
+            private_var_defs=textwrap.indent(self.private_var_defs(name), ' ' * 4),
+            public_var_defs=textwrap.indent(self.public_var_defs(name), ' ' * 4),
+            MX_COPY_REFS=MX_COPY_REFS,
+            private_meth_defs=textwrap.indent(self.private_meth_defs(name), ' ' * 4),
+            public_meth_defs=textwrap.indent(self.public_meth_defs(name), ' ' * 4)
+        )
+
+    @cached_property
+    def child_cimports(self):
+        # cimports for child spaces
+        stmts = []
+        for space in self.spaces:
+            parent = ".".join(self.module_name.split(".")[:-1])
+            child = MODULE_PREF + space[len(SPACE_PREF):]   # replace _c_ with _m_
+            stmts.append(f"from cython.cimports.{parent} import {child}\n")
+
+        return "".join(stmts)
+
+    def private_var_defs(self, cls_name):
+
+        decl_stmts = []
+        for cells in self.cells_info[cls_name].values():
+
+            assert cells.module_name == self.module_name
+            assert cells.cls_name == cls_name
+
+            if cells.is_special():
+                continue
+
+            if cells.has_args():
+                if cells.is_arrayable(self.get_arg_sizes(cls_name)):
+
+                    var_name = VAR_PREF + cells.name
+                    var_type = cells.get_decltype_expr(self.get_arg_sizes(cls_name), with_module=False, use_double=True)
+                    decl_stmts.append(f"cdef {var_type} {var_name}\n")
+
+                    has_name = HAS_PREF + cells.name
+                    has_type = cells.get_decltype_expr(
+                                self.get_arg_sizes(cls_name),
+                                rettype_expr=CY_BOOL_T, with_module=False, use_double=True)
+                    decl_stmts.append(f"cdef {has_type} {has_name}\n")
+
+                else:
+                    decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
+            else:
+                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                decl_stmts.append(f"cdef {rettype} {VAR_PREF + cells.name}\n")
+                decl_stmts.append(f"cdef {CY_BOOL_T} {HAS_PREF + cells.name}\n")
+
+        return "".join(decl_stmts)
+
+    def public_var_defs(self, cls_name):
+
+        decl_stmts = []
+        for ref in self.ref_info.values():
+            if ref.module_name != self.module_name or ref.cls_name != cls_name:
+                continue
+
+            stmt = f"cdef public {get_type_expr(ref.type_, with_module=False, use_double=True)} {ref.name}\n"
+            decl_stmts.append(stmt)
+
+        # Declare child spaces
+        for space in self.spaces.get(cls_name, []):
+            mod_name = MODULE_PREF + cls_name[len(SPACE_PREF):]  # Replace prefix for submodule
+            rel_path = mod_name + "." + MX_SPACE_MOD + "." + SPACE_PREF + space
+
+            stmt = f"cdef public {rel_path} {space}\n"
+            decl_stmts.append(stmt)
+
+        return "".join(decl_stmts)
+
+    def _add_param_type_hints(
+        self, cls_name: str, cells_name: str
+    ) -> str:
+
+        cells = self.cells_info[cls_name][cells_name]
+        params = [f"{cls_name} {MX_SELF}"] # add self first
+
+        # Add parameter type hints
+        if cells and cells.has_typeinfo() and cells.has_args():
+            for param in cells.params:
+                type_ = cells.get_argtype_expr(param, with_module=False, use_double=True)
+                params.append(f"{type_} {param}")
+        else:
+            for p in cells.params:
+                params.append(f"object {p}")
+
+        return ", ".join(params)
+
+    def private_meth_defs(self, cls_name):
+
+        decl_stmts = []
+        for cells in self.cells_info[cls_name].values():
+
+            if cells.is_special():
+                continue
+
+            if cells and cells.has_typeinfo():
+                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                parameters = self._add_param_type_hints(
+                    cls_name=cls_name, cells_name=cells.name
+                )
+                decl_stmts.append(
+                    f"cdef {rettype} {FORMULA_PREF + cells.name}({parameters})\n"
+                )
+            else:
+                parameters = self._add_param_type_hints(
+                    cls_name=cls_name, cells_name=cells.name
+                )
+                decl_stmts.append(
+                    f"cdef object {FORMULA_PREF + cells.name}({parameters})\n"
+                )
+
+        return "".join(decl_stmts)
+
+    def public_meth_defs(self, cls_name):
+
+        decl_stmts = []
+        for cells in self.cells_info[cls_name].values():
+
+            if cells.is_special():
+                continue
+
+            if cells and cells.has_typeinfo():
+                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                parameters = self._add_param_type_hints(
+                    cls_name=cls_name, cells_name=cells.name
+                )
+                decl_stmts.append(
+                    f"cpdef {rettype} {cells.name}({parameters})\n"
+                )
+            else:
+                parameters = self._add_param_type_hints(
+                    cls_name=cls_name, cells_name=cells.name
+                )
+                decl_stmts.append(
+                    f"cpdef object {cells.name}({parameters})\n"
+                )
+
+        return "".join(decl_stmts)
+
+    #TODO: Dupolicate def
+    def get_arg_sizes(self, cls_name: str) -> Mapping[str, int]:
+        space = self.spec.get_spec(self.module_name + "." + cls_name)
+        params = space.get("cells_params", {})
+        return {k: v["size"] for k, v in params.items() if "size" in v}
 
 
 class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
@@ -256,21 +467,16 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
     def __init__(
         self,
-        module_name: str,
-        source: str,
-        cells_info: dict,
-        ref_info: dict,
-        spec: TranslationSpec,
+        visitor: SpaceVisitor,
     ) -> None:
         super().__init__()
-        self.module_name = module_name
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        self.module_name = visitor.module_name
+        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(visitor.source))
         self.module = self.wrapper.module
-        self.spec = spec
-        space = SpaceVisitor(module_name, source, spec, cells_info, ref_info)
-        self.cells_info = space.cells_info
-        self.ref_info = space.ref_info
-        self.spaces = space.spaces
+        self.spec = visitor.spec
+        self.cells_info = visitor.cells_info
+        self.ref_info = visitor.ref_info
+        self.spaces = visitor.spaces
 
     @property
     def package(self) -> str:
@@ -287,12 +493,25 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
+
+        # cimports for child spaces
+        stmts = []
+        for space in self.spaces:
+
+            parent = ".".join(self.module_name.split(".")[:-1])
+            child = MODULE_PREF + space[len(SPACE_PREF):]   # replace _c_ with _m_
+            stmts.append(cst.parse_statement(
+                f"from cython.cimports.{parent} import {child}",
+                config=updated_node.config_for_parsing,
+            ))
+
         return updated_node.with_changes(
             body=(
                 cst.parse_statement(
                     f"from cython.cimports.{self.package} import {MX_SYS_MOD}",
                     config=updated_node.config_for_parsing,
                 ),
+                *stmts,
                 cst.parse_statement(
                     f"import cython as {CY_MOD}", config=updated_node.config_for_parsing
                 ),
@@ -308,11 +527,12 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
             self.get_metadata(ScopeProvider, original_node), GlobalScope
         ):
             decl_stmts = []
-            for cells in self.cells_info.values():
+            for cells in self.cells_info[cls_name].values():
 
-                if cells.module_name != self.module_name or cells.cls_name != cls_name:
-                    continue
-                elif cells.is_special():
+                assert cells.module_name == self.module_name
+                assert cells.cls_name == cls_name
+
+                if cells.is_special():
                     continue
 
                 if cells.has_args():
@@ -333,7 +553,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                                 + ": "
                                 + cells.get_decltype_expr(
                                     self.get_arg_sizes(cls_name),
-                                    rettype_expr=CY_BOOL_T,
+                                    rettype_expr=f"{CY_MOD}.{CY_BOOL_T}",
                                 ),
                                 config=self.module.config_for_parsing,
                             )
@@ -356,7 +576,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
                     decl_stmts.append(
                         cst.parse_statement(
-                            HAS_PREF + cells.name + ": " + CY_BOOL_T,
+                            HAS_PREF + cells.name + ": " + CY_MOD + "." + CY_BOOL_T,
                             config=self.module.config_for_parsing,
                         )
                     )
@@ -368,7 +588,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                     continue
 
                 stmt = cst.parse_statement(
-                    f"{ref.name} = {CY_MOD}.declare({ref.type_expr}, visibility='public')",
+                    f"{ref.name}: {get_type_expr(ref.type_)}",
                     config=self.module.config_for_parsing,
                 )
                 if is_first:
@@ -379,14 +599,15 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
                 decl_stmts.append(stmt)
 
+            # Declare child spaces
             is_first = True
             for space in self.spaces.get(cls_name, []):
 
                 mod_name = MODULE_PREF + cls_name[len(SPACE_PREF):]  # Replace prefix for submodule
-                rel_path = mod_name + "." + SPACE_PREF + space
+                rel_path = mod_name + "." + MX_SPACE_MOD + "." + SPACE_PREF + space
 
                 stmt = cst.parse_statement(
-                    f"{space} = {CY_MOD}.declare(object, visibility='public')",
+                    f"{space}: {rel_path}",
                     config=self.module.config_for_parsing,
                 )
                 if is_first:
@@ -457,7 +678,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
         if name[:len(FORMULA_PREF)] == FORMULA_PREF:
             name = name[len(FORMULA_PREF):]
 
-        cells = self.cells_info.get((cls_name, name))
+        if (d := self.cells_info.get(cls_name)):
+            cells = d.get(name)
+        else:
+            cells = None
 
         # Add parameter type hints
         if cells and cells.has_typeinfo() and cells.has_args():
@@ -506,7 +730,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
-                cells = self.cells_info.get((cls_name, meth_name[len(FORMULA_PREF):]))
+                if (d := self.cells_info.get(cls_name)):
+                    cells = d.get(meth_name[len(FORMULA_PREF):])
+                else:
+                    cells = None
 
                 decorators = [
                     cst.Decorator(
@@ -564,7 +791,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
             elif meth_name == "__call__":
                 # Special methods
-                cells = self.cells_info.get((cls_name, meth_name))
+                if (d := self.cells_info.get(cls_name)):
+                    cells = d.get(meth_name)
+                else:
+                    cells = None
 
                 if cells and cells.has_typeinfo() and cells.has_args():
                     parameters = self._add_param_type_hints(
@@ -578,7 +808,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
 
             else:
                 # cells
-                cells: CombinedCellsInfo = self.cells_info[cls_name, meth_name]
+                cells: CombinedCellsInfo = self.cells_info[cls_name][meth_name]
 
                 decorators = [
                     cst.Decorator(

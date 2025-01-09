@@ -26,7 +26,7 @@ from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.config import TranslationSpec
-from modelx_cython.transformer import SpaceTransformer
+from modelx_cython.transformer import SpaceTransformer, SpaceVisitor, PXDGenerator
 
 
 def increment_backups(
@@ -96,18 +96,28 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             subs = m.split(".")
             assert subs.pop(0) == model_path.name
             assert subs[-1] in [MX_MODEL_MOD, MX_SPACE_MOD]
+            pxd_path = subs.copy()
             subs[-1] = subs[-1] + ".py"
+            pxd_path[-1] = pxd_path[-1] + ".pxd"
             abs_src_path = model_path / "/".join(subs)
             rel_src_path = rel_model_path / "/".join(subs)
+            abs_pxd_path = model_path / "/".join(pxd_path)
+            abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
 
-            trans = SpaceTransformer(
-                module_name=m, 
+            visitor = SpaceVisitor(
+                module_name=m,
                 source=abs_src_path.read_text(),
+                spec=TranslationSpec(spec),
                 cells_info=logger.cells_info,
                 ref_info=logger.ref_info,
-                spec=TranslationSpec(spec)
             )
+
+            trans = SpaceTransformer(visitor=visitor)
+            pxd = PXDGenerator(visitor=visitor)
+
             abs_src_path.write_text(trans.transformed.code)
+            abs_pxd_path.write_text(pxd.code)
+            abs_init_path.write_text("from . cimport _mx_classes")
             modules.append(rel_src_path)
 
         create_setup(model_name, modules=modules, setup_file=setup_file)

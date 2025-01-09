@@ -34,9 +34,9 @@ PD_MOD = GLOBAL_PREF + "pd"
 
 ANY_T = "object"
 FLOAT_T = "float"
-CY_BOOL_T = CY_MOD + ".bint"
-CY_INT_T = CY_MOD + ".int"
-CY_FLOAT_T = CY_MOD + ".double"
+CY_BOOL_T = "bint"
+CY_INT_T = "int"
+CY_FLOAT_T = "double"
 
 
 def is_user_defined(name: str):
