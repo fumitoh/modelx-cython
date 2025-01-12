@@ -52,6 +52,7 @@ from modelx_cython.consts import (
     MX_SPACE_MOD,
     CY_MOD,
     CY_INT_T,
+    CY_INT_T_P
 )
 
 if sys.version_info >= (3, 12):
@@ -173,7 +174,7 @@ class RuntimeRefInfo:
 def get_type_expr(typ, with_module=True, use_double=False):
     if typ is int:
         if with_module:
-            return f"{CY_MOD}.{CY_INT_T}"
+            return f"{CY_MOD}.{CY_INT_T_P}"
         else:
             return CY_INT_T
     elif typ is float:
