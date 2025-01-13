@@ -7,19 +7,20 @@ import pytest
 
 
 @pytest.fixture
-def copy_sample(tmp_path_factory, request):
-    sample_dir = request.node.get_closest_marker("sample_dir").args[0]
-    dst = tmp_path_factory.mktemp("temp") / "samples" / sample_dir
-    shutil.copytree(pathlib.Path(__file__).parent / "samples" / sample_dir, dst)
+def sample_dir(tmp_path_factory, request):
+    sample = request.param
+    dst = tmp_path_factory.mktemp("temp") / "samples" / sample
+    shutil.copytree(pathlib.Path(__file__).parent / "samples" / sample, dst)
     return dst
 
-@pytest.mark.sample_dir("basicterm_s")
+
+@pytest.mark.parametrize("sample_dir", ["basicterm_s"], indirect=True)
 @pytest.mark.parametrize("target", ["mx2cy", "main"])
-def test_mx2cy_with_basicterm_s(copy_sample, target):
+def test_mx2cy_with_basicterm_s(sample_dir, target):
     import lifelib
     import modelx as mx
 
-    work_dir = copy_sample # / "basicterm_s"
+    work_dir = sample_dir # / "basicterm_s"
     lifelib.create('basiclife', work_dir / 'basiclife')
     mx.read_model(work_dir / 'basiclife' / 'BasicTerm_S').export(work_dir / 'BasicTerm_S_nomx')
 
@@ -42,13 +43,12 @@ def test_mx2cy_with_basicterm_s(copy_sample, target):
     ).returncode == 0
 
 
-
-@pytest.mark.sample_dir("ref_space")
+@pytest.mark.parametrize("sample_dir", ["ref_space"], indirect=True)
 @pytest.mark.parametrize("target", ["mx2cy", "main"])
-def test_mx2cy_with_ref_space(copy_sample, target):
+def test_mx2cy_with_ref_space(sample_dir, target):
     import modelx as mx
 
-    work_dir = copy_sample
+    work_dir = sample_dir
     mx.read_model(work_dir / 'RefSpace').export(work_dir / 'RefSpace_nomx')
     del mx.get_models()["RefSpace"]
 
