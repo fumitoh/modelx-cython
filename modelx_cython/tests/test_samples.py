@@ -14,20 +14,21 @@ def sample_dir(tmp_path_factory, request):
     return dst
 
 
-@pytest.mark.parametrize("sample_dir", ["basicterm_s"], indirect=True)
+@pytest.mark.parametrize("sample_dir, model", [["basicterm_s", "BasicTerm_S"],
+                                               ["basicterm_sc", "BasicTerm_SC"]], indirect=["sample_dir"])
 @pytest.mark.parametrize("target", ["mx2cy", "main"])
-def test_mx2cy_with_basicterm_s(sample_dir, target):
+def test_mx2cy_with_lifelib(sample_dir, target, model):
     import lifelib
     import modelx as mx
 
     work_dir = sample_dir # / "basicterm_s"
     lifelib.create('basiclife', work_dir / 'basiclife')
-    mx.read_model(work_dir / 'basiclife' / 'BasicTerm_S').export(work_dir / 'BasicTerm_S_nomx')
+    mx.read_model(work_dir / 'basiclife' / model).export(work_dir / (model + '_nomx'))
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
 
-    argv = ["mx2cy", str(work_dir / "BasicTerm_S_nomx"),
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
          "--spec", str(work_dir / "spec.py"),
          "--sample", str(work_dir / "sample.py")]
 
