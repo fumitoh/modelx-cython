@@ -163,11 +163,8 @@ class RuntimeCellsInfo:
 
 @dataclass
 class RuntimeRefInfo:
-    logger: 'MxCallTraceLogger'
-    type_expr: str
 
-    def __init__(self, logger, value):
-        self.logger = logger
+    def __init__(self, value):
         self.type_ = type(value)
 
 
@@ -373,7 +370,7 @@ class MxCallTraceLogger(CallTraceLogger):
                 names = k.split(".")
                 assert names[-1] == MX_ASSIGN_REFS
                 fqname = ".".join(names[:-1] + [name])
-                self.ref_info[fqname] = RuntimeRefInfo(self, value)
+                self.ref_info[fqname] = RuntimeRefInfo(value)
         self.refs.clear()
 
         if self.new_name:
