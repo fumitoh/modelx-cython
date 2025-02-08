@@ -207,7 +207,7 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
             rt_info = self._rt_ref_info.get(
                 self.module_name + "." + cls_name + "." + name, None
             )
-            self.ref_info[self.module_name, cls_name, name] = LexicalRefInfo(
+            self.ref_info.setdefault(cls_name, {})[name] = LexicalRefInfo(
                 self.module_name,
                 cls_name,
                 name,
@@ -368,9 +368,9 @@ class PXDGenerator:
     def public_var_defs(self, cls_name):
 
         decl_stmts = []
-        for ref in self.ref_info.values():
-            if ref.module_name != self.module_name or ref.cls_name != cls_name:
-                continue
+        for ref in self.ref_info.get(cls_name, {}).values():
+
+            assert ref.module_name == self.module_name and ref.cls_name == cls_name
 
             stmt = f"cdef public {get_type_expr(ref.type_, with_module=False, use_double=True)} {ref.name}\n"
             decl_stmts.append(stmt)
@@ -582,10 +582,9 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                     )
 
             is_first = True
-            for ref in self.ref_info.values():
+            for ref in self.ref_info.get(cls_name, {}).values():
 
-                if ref.module_name != self.module_name or ref.cls_name != cls_name:
-                    continue
+                assert ref.module_name == self.module_name and ref.cls_name == cls_name
 
                 stmt = cst.parse_statement(
                     f"{ref.name}: {get_type_expr(ref.type_)}",
