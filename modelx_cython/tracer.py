@@ -29,7 +29,7 @@ from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 
 import numpy as np
 
-from modelx_cython.tracing import (
+from modelx_cython.monkeytype_tracing import (
     CallTraceLogger,
     get_func,
     CodeFilter,
