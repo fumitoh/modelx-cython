@@ -286,16 +286,18 @@ class MxCallTracer(CallTracer):
                 ret_opcodes = (RETURN_VALUE_OPCODE,)
             if last_opcode in ret_opcodes:
                 trace.ret_val = arg
-            del self.traces[frame]
 
-            if trace.func.__name__ == MX_ASSIGN_REFS:
-                self.logger.refs[trace.funcname] = {
-                    k: v
-                    for k, v in frame.f_locals[MX_SELF].__dict__.items()
-                    if is_user_defined(k)
-                }
-            else:
-                self.logger.log(trace)
+            # Extract and store local variables
+            # code = frame.f_code
+            # arg_names = code.co_varnames[0: code.co_argcount]
+            # loc_vals = {}
+            # for loc in frame.f_locals:
+            #     if loc not in arg_names:
+            #         loc_vals[loc] = frame.f_locals[loc]
+            # trace.loc_vals = loc_vals
+
+            del self.traces[frame]
+            self.logger.log(trace)
 
     def __call__(self, frame: FrameType, event: str, arg: Any) -> "CallTracer":
         code = frame.f_code
@@ -349,7 +351,6 @@ class MxCallTraceLogger(CallTraceLogger):
         super().__init__()
         self.new_name = new_model_name
         self._traces = {}  # funcname -> [trace]
-        self.refs = {}  # full qualified name -> {name: value}
         self.cells_info = {}  # funcname -> MethodTypeInfo
         self.ref_info = {}
         self.modules = []
@@ -360,18 +361,21 @@ class MxCallTraceLogger(CallTraceLogger):
 
     def flush(self) -> None:
         for k, v in self._traces.items():
-            self.cells_info[k] = info = RuntimeCellsInfo(v)
-            if info.module not in self.modules:
-                self.modules.append(info.module)
-        self._traces.clear()
 
-        for k, refs in self.refs.items():
-            for name, value in refs.items():
-                names = k.split(".")
-                assert names[-1] == MX_ASSIGN_REFS
-                fqname = ".".join(names[:-1] + [name])
-                self.ref_info[fqname] = RuntimeRefInfo(value)
-        self.refs.clear()
+            tr0 = v[0]  # First trace
+            if tr0.func.__name__ == MX_ASSIGN_REFS:
+                # Extract refs
+                for name, val in tr0.arg_vals[MX_SELF].__dict__.items():
+                    if is_user_defined(name):
+                        fqname = ".".join(tr0.funcname.split(".")[:-1] + [name])
+                        self.ref_info[fqname] = RuntimeRefInfo(val)
+            else:
+                # Extract cells
+                self.cells_info[k] = info = RuntimeCellsInfo(v)
+                if info.module not in self.modules:
+                    self.modules.append(info.module)
+
+        self._traces.clear()
 
         if self.new_name:
             self._update_model_name()
