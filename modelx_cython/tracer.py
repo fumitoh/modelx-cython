@@ -50,6 +50,10 @@ from modelx_cython.consts import (
     MX_SELF,
     MX_MODEL_MOD,
     MX_SPACE_MOD,
+    MX_SYS_MOD,
+    BASE_MODEL,
+    SPACE_PREF,
+    SPACE_PARAMS,
     CY_MOD,
     CY_INT_T,
     CY_INT_T_P
@@ -163,6 +167,12 @@ class RuntimeCellsInfo:
 
 @dataclass
 class RuntimeRefInfo:
+
+    def __init__(self, value):
+        self.type_ = type(value)
+
+
+class RuntimeParamInfo:
 
     def __init__(self, value):
         self.type_ = type(value)
@@ -347,13 +357,15 @@ class MxCodeFilter:
 class MxCallTraceLogger(CallTraceLogger):
     """Log and store/print records collected by a CallTracer."""
 
-    def __init__(self, new_model_name: str = None) -> None:
+    def __init__(self, module: str, new_model_name: str = None) -> None:
         super().__init__()
+        self.module = module
         self.new_name = new_model_name
         self._traces = {}  # funcname -> [trace]
         self.cells_info = {}  # funcname -> MethodTypeInfo
         self.ref_info = {}
         self.modules = []
+        self.param_info = {}  # class name -> {param: RuntimeParamInfo}
 
     def log(self, trace: CallTrace) -> None:
         """Log a single call trace."""
@@ -376,6 +388,7 @@ class MxCallTraceLogger(CallTraceLogger):
                     self.modules.append(info.module)
 
         self._traces.clear()
+        self._get_params()
 
         if self.new_name:
             self._update_model_name()
@@ -399,6 +412,40 @@ class MxCallTraceLogger(CallTraceLogger):
         for key in list(self.ref_info.keys()):
             self.ref_info[replace_first_name(key, self.new_name)] = self.ref_info.pop(key)
 
+        for key in list(self.param_info.keys()):
+            self.param_info[replace_first_name(key, self.new_name)] = self.param_info.pop(key)
+
+    def _get_params(self):
+        module = sys.modules[self.module + "." + MX_MODEL_MOD]
+        base_cls = getattr(sys.modules[self.module + "." + MX_SYS_MOD], BASE_MODEL)
+        model_cls = next(v for v in module.__dict__.values() if isinstance(v, type) and issubclass(v, base_cls))
+        model = next(v for v in module.__dict__.values() if isinstance(v, model_cls))
+
+        for space in model._mx_spaces.values():
+            self._walk_space(space, {})
+
+    def _walk_space(self, top_space, params):
+        for space in top_space._mx_walk():
+
+            if params:
+                key = space.__class__.__module__ + "." + space.__class__.__name__
+                val = self.param_info.get(key, None)
+                if (not val) or len(val) < len(params):
+                    self.param_info[key] = params
+
+            if hasattr(space, "__call__"):
+                space_name = space.__class__.__name__[len(SPACE_PREF):]
+                param_list = getattr(sys.modules[space.__class__.__module__], SPACE_PARAMS + "_" + space_name)
+
+                for k, v in space._mx_itemspaces.items():
+                    next_params = params.copy()
+                    if isinstance(k, tuple):
+                        for name, arg in zip(param_list, k):
+                            next_params[name] = RuntimeParamInfo(arg)
+                    else:
+                        next_params[param_list[0]] = RuntimeParamInfo(k)
+
+                    self._walk_space(v, next_params)
 
 
 @contextmanager

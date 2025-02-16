@@ -28,6 +28,8 @@ MX_SYS_MOD = FILE_PREF + "sys"
 
 MX_ASSIGN_REFS = GLOBAL_PREF + "assign_refs"
 MX_COPY_REFS = GLOBAL_PREF + "copy_refs"
+BASE_MODEL = "BaseModel"
+SPACE_PARAMS = VAR_PREF + "space_params"
 CY_MOD = GLOBAL_PREF + "cy"
 NP_MOD = GLOBAL_PREF + "np"
 PD_MOD = GLOBAL_PREF + "pd"

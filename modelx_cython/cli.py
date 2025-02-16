@@ -56,7 +56,7 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
         module_path = str(model_path.parent)
         sys.path.insert(0, module_path)
 
-        logger = MxCallTraceLogger(new_model_name=new_model_name)
+        logger = MxCallTraceLogger(module=module, new_model_name=new_model_name)
         with trace_calls(
             module=module,
             logger=logger,
@@ -110,6 +110,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 spec=TranslationSpec(spec),
                 cells_info=logger.cells_info,
                 ref_info=logger.ref_info,
+                param_info=logger.param_info
             )
 
             trans = SpaceTransformer(visitor=visitor)

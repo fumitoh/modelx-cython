@@ -138,7 +138,7 @@ class SpaceAddin:
 class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
-    def __init__(self, module_name, source, spec, cells_info: dict, ref_info: dict):
+    def __init__(self, module_name, source, spec, cells_info: dict, ref_info: dict, param_info: dict):
         super().__init__()
         self.module_name = module_name
         self.source = source
@@ -149,8 +149,24 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
         self.spaces = {}    # Parent class name to list of child space names
         self._rt_cells_info = cells_info
         self._rt_ref_info = ref_info
+        self._rt_param_info = param_info
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
+        self._add_params()
+
+    def _add_params(self):
+        for cls in self.classes:
+            key = self.module_name + "." + cls
+            params = self._rt_param_info.get(key, None)
+            if params:
+                ref_info = self.ref_info.setdefault(cls, {})
+                for param, rt_info in params.items():
+                    ref_info[param] = LexicalRefInfo(
+                        module_name=self.module_name,
+                        cls_name=cls,
+                        name=param,
+                        type_=rt_info.type_,
+                    )
 
     @m.leave(m.ClassDef())
     def collect_classes(self, original_node):

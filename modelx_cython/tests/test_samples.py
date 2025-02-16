@@ -44,19 +44,22 @@ def test_mx2cy_with_lifelib(sample_dir, target, model):
     ).returncode == 0
 
 
-@pytest.mark.parametrize("sample_dir", ["ref_space"], indirect=True)
+@pytest.mark.parametrize("sample_dir, model", [["ref_space", "RefSpace"],
+                                               ["nested_params", "NestedParams"],
+                                               ["duplicated_params", "DuplicatedParams"]],
+                         indirect=["sample_dir"])
 @pytest.mark.parametrize("target", ["mx2cy", "main"])
-def test_mx2cy_with_ref_space(sample_dir, target):
+def test_mx2cy_with_ref_space(sample_dir, target, model):
     import modelx as mx
 
     work_dir = sample_dir
-    mx.read_model(work_dir / 'RefSpace').export(work_dir / 'RefSpace_nomx')
-    del mx.get_models()["RefSpace"]
+    mx.read_model(work_dir / model).export(work_dir / (model + '_nomx'))
+    del mx.get_models()[model]
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
 
-    argv = ["mx2cy", str(work_dir / "RefSpace_nomx"),
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
             "--spec", str(work_dir / "spec.py"),
             "--sample", str(work_dir / "sample.py")]
 
