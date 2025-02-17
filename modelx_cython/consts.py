@@ -25,6 +25,7 @@ MX_SELF = "self"
 MX_MODEL_MOD = FILE_PREF + "model"
 MX_SPACE_MOD = FILE_PREF + "classes"
 MX_SYS_MOD = FILE_PREF + "sys"
+MX_TOP_MOD = GLOBAL_PREF + "top"
 
 MX_ASSIGN_REFS = GLOBAL_PREF + "assign_refs"
 MX_COPY_REFS = GLOBAL_PREF + "copy_refs"
