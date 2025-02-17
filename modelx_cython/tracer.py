@@ -165,17 +165,27 @@ class RuntimeCellsInfo:
             return ValueInfo(normalize_type(type(value)))
 
 
-@dataclass
-class RuntimeRefInfo:
+class RuntimeValueInfo:
 
-    def __init__(self, value):
+    def __init__(self, value, mx_class=''):
         self.type_ = type(value)
+        self.mx_class = mx_class
+
+    @classmethod
+    def init_mxobj(cls, value, module):
+        if (value.__class__.__module__)[:len(module)] == module:
+            return cls(value, mx_class=value.__class__.__module__ + "." + value.__class__.__qualname__)
+        else:
+            return cls(value)
 
 
-class RuntimeParamInfo:
 
-    def __init__(self, value):
-        self.type_ = type(value)
+class RuntimeRefInfo(RuntimeValueInfo):
+    pass
+
+
+class RuntimeParamInfo(RuntimeValueInfo):
+    pass
 
 
 def get_type_expr(typ, with_module=True, use_double=False):
@@ -240,6 +250,12 @@ def comp_and_get_type(lt: ValueInfo, rt: ValueInfo) -> ValueInfo:
 
     else:  # lt or rt is array
         return ValueInfo(object)
+
+
+def replace_first_name(dotted_name: str, name: str):
+    names = dotted_name.split(".")
+    names[0] = name
+    return ".".join(names)
 
 
 class MxCallTracer(CallTracer):
@@ -380,7 +396,7 @@ class MxCallTraceLogger(CallTraceLogger):
                 for name, val in tr0.arg_vals[MX_SELF].__dict__.items():
                     if is_user_defined(name):
                         fqname = ".".join(tr0.funcname.split(".")[:-1] + [name])
-                        self.ref_info[fqname] = RuntimeRefInfo(val)
+                        self.ref_info[fqname] = RuntimeRefInfo.init_mxobj(val, self.module)
             else:
                 # Extract cells
                 self.cells_info[k] = info = RuntimeCellsInfo(v)
@@ -396,10 +412,6 @@ class MxCallTraceLogger(CallTraceLogger):
     def _update_model_name(self):
         """Change the model name stored in members"""
 
-        def replace_first_name(dotted_name: str, name: str):
-            names = dotted_name.split(".")
-            names[0] = name
-            return ".".join(names)           
         
         for i, v in enumerate(self.modules):
             self.modules[i] = replace_first_name(v, self.new_name)
@@ -410,10 +422,17 @@ class MxCallTraceLogger(CallTraceLogger):
             self.cells_info[replace_first_name(key, self.new_name)] = v
 
         for key in list(self.ref_info.keys()):
-            self.ref_info[replace_first_name(key, self.new_name)] = self.ref_info.pop(key)
+            v = self.ref_info.pop(key)
+            if v.mx_class:
+                v.mx_class = replace_first_name(v.mx_class, self.new_name)
+            self.ref_info[replace_first_name(key, self.new_name)] = v
 
         for key in list(self.param_info.keys()):
-            self.param_info[replace_first_name(key, self.new_name)] = self.param_info.pop(key)
+            params = self.param_info[key]
+            for v in list(params.values()):
+                if v.mx_class:
+                    v.mx_class = replace_first_name(v.mx_class, self.new_name)
+            self.param_info[replace_first_name(key, self.new_name)] = params
 
     def _get_params(self):
         module = sys.modules[self.module + "." + MX_MODEL_MOD]
@@ -441,9 +460,9 @@ class MxCallTraceLogger(CallTraceLogger):
                     next_params = params.copy()
                     if isinstance(k, tuple):
                         for name, arg in zip(param_list, k):
-                            next_params[name] = RuntimeParamInfo(arg)
+                            next_params[name] = RuntimeParamInfo.init_mxobj(arg, self.module)
                     else:
-                        next_params[param_list[0]] = RuntimeParamInfo(k)
+                        next_params[param_list[0]] = RuntimeParamInfo.init_mxobj(k, self.module)
 
                     self._walk_space(v, next_params)
 

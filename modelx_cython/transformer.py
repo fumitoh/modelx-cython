@@ -29,7 +29,7 @@ import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
 from modelx_cython.config import TranslationSpec
-from modelx_cython.tracer import RuntimeCellsInfo, get_type_expr
+from modelx_cython.tracer import RuntimeCellsInfo, get_type_expr, replace_first_name
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -42,6 +42,7 @@ from modelx_cython.consts import (
     MX_SELF,
     MX_SYS_MOD,
     MX_SPACE_MOD,
+    MX_TOP_MOD,
     CY_BOOL_T,
     MX_ASSIGN_REFS,
     MX_COPY_REFS,
@@ -110,11 +111,54 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
 
 @dataclass
-class LexicalRefInfo:
+class CombinedRefInfo:
     module_name: str
     cls_name: str
     name: str
-    type_: type
+    type_: type = None
+    mx_class: str = ''
+    decl_type_expr: str = ''
+    is_relative: bool = False
+
+    @classmethod
+    def init_with_rt(cls, module_name,
+                        cls_name,
+                        name,
+                        rt_info):
+        if rt_info:
+
+            if rt_info.mx_class:
+                if rt_info.mx_class[:len(module_name)] == module_name:
+                    # Defined in a child space
+                    decl_type_expr = rt_info.mx_class[len(module_name) + 1:]
+                    is_relative = True
+                else:
+                    decl_type_expr = rt_info.mx_class
+                    # decl_type_expr = replace_first_name(decl_type_expr, MX_TOP_MOD)
+                    is_relative = False
+            else:
+                decl_type_expr = ''
+                is_relative = False
+
+            return cls(module_name=module_name,
+                       cls_name=cls_name,
+                       name=name,
+                       type_=rt_info.type_,
+                       mx_class=rt_info.mx_class,
+                       decl_type_expr=decl_type_expr,
+                       is_relative=is_relative)
+        else:
+            return cls(module_name=module_name,
+                       cls_name=cls_name,
+                       name=name)
+
+    def get_type_expr(self, with_module=True, use_double=False):
+        if self.decl_type_expr:
+            return self.decl_type_expr
+        else:
+            return get_type_expr(self.type_, with_module=with_module, use_double=use_double)
+
+
 
 class SpaceAddin:
 
@@ -144,15 +188,17 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
         self.source = source
         self.spec = spec
         self.cells_info = {}
-        self.ref_info = {}
+        self.ref_info = {}  # {class_name: {name: CombinedRefInfo}}
         self.classes = []
         self.spaces = {}    # Parent class name to list of child space names
+        self.cimports = []
         self._rt_cells_info = cells_info
         self._rt_ref_info = ref_info
         self._rt_param_info = param_info
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
         self._add_params()
+        self._set_cimports()
 
     def _add_params(self):
         for cls in self.classes:
@@ -161,12 +207,20 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
             if params:
                 ref_info = self.ref_info.setdefault(cls, {})
                 for param, rt_info in params.items():
-                    ref_info[param] = LexicalRefInfo(
+                    ref_info[param] = CombinedRefInfo.init_with_rt(
                         module_name=self.module_name,
                         cls_name=cls,
                         name=param,
-                        type_=rt_info.type_,
+                        rt_info=rt_info,
                     )
+
+    def _set_cimports(self):
+        for refs in self.ref_info.values():
+            for r in refs.values():
+                if r.decl_type_expr and not r.is_relative:
+                    mod = ".".join(r.decl_type_expr.split(".")[:-1])
+                    if mod not in self.cimports:
+                        self.cimports.append(mod)
 
     @m.leave(m.ClassDef())
     def collect_classes(self, original_node):
@@ -223,11 +277,11 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
             rt_info = self._rt_ref_info.get(
                 self.module_name + "." + cls_name + "." + name, None
             )
-            self.ref_info.setdefault(cls_name, {})[name] = LexicalRefInfo(
+            self.ref_info.setdefault(cls_name, {})[name] = CombinedRefInfo.init_with_rt(
                 self.module_name,
                 cls_name,
                 name,
-                rt_info.type_ if rt_info else None,
+                rt_info=rt_info
             )
 
     @m.call_if_inside(m.ClassDef())
@@ -280,6 +334,8 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
 class PXDGenerator:
 
     pxd_template = textwrap.dedent("""\
+    cimport {package} as {MX_TOP_MOD}
+    {cmodule_imports}
     from {package} cimport {MX_SYS_MOD}
     {child_cimports}
 
@@ -305,15 +361,26 @@ class PXDGenerator:
         self.ref_info = visitor.ref_info
         self.spaces = visitor.spaces
         self.spec = visitor.spec
+        self.cimports = visitor.cimports
 
     @cached_property
     def package(self) -> str:
         return self.module_name.split(".")[0]
 
     @cached_property
+    def cmodule_imports(self) -> str:
+        stmts = []
+        for ci in self.cimports:
+            stmts.append(f"cimport {ci}")
+        return "\n".join(stmts)
+
+
+    @cached_property
     def code(self):
         return self.pxd_template.format(
             package=self.package,
+            cmodule_imports=self.cmodule_imports,
+            MX_TOP_MOD=MX_TOP_MOD,
             MX_SYS_MOD=MX_SYS_MOD,
             child_cimports=self.child_cimports,
             class_defs=self.class_defs
@@ -388,7 +455,7 @@ class PXDGenerator:
 
             assert ref.module_name == self.module_name and ref.cls_name == cls_name
 
-            stmt = f"cdef public {get_type_expr(ref.type_, with_module=False, use_double=True)} {ref.name}\n"
+            stmt = f"cdef public {ref.get_type_expr(with_module=False, use_double=True)} {ref.name}\n"
             decl_stmts.append(stmt)
 
         # Declare child spaces
@@ -603,7 +670,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
                 assert ref.module_name == self.module_name and ref.cls_name == cls_name
 
                 stmt = cst.parse_statement(
-                    f"{ref.name}: {get_type_expr(ref.type_)}",
+                    f"{ref.name}: {ref.get_type_expr()}",
                     config=self.module.config_for_parsing,
                 )
                 if is_first:
