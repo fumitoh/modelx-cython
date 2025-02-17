@@ -42,7 +42,6 @@ from modelx_cython.consts import (
     MX_SELF,
     MX_SYS_MOD,
     MX_SPACE_MOD,
-    MX_TOP_MOD,
     CY_BOOL_T,
     MX_ASSIGN_REFS,
     MX_COPY_REFS,
@@ -134,7 +133,6 @@ class CombinedRefInfo:
                     is_relative = True
                 else:
                     decl_type_expr = rt_info.mx_class
-                    # decl_type_expr = replace_first_name(decl_type_expr, MX_TOP_MOD)
                     is_relative = False
             else:
                 decl_type_expr = ''
@@ -334,7 +332,6 @@ class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
 class PXDGenerator:
 
     pxd_template = textwrap.dedent("""\
-    cimport {package} as {MX_TOP_MOD}
     {cmodule_imports}
     from {package} cimport {MX_SYS_MOD}
     {child_cimports}
@@ -380,7 +377,6 @@ class PXDGenerator:
         return self.pxd_template.format(
             package=self.package,
             cmodule_imports=self.cmodule_imports,
-            MX_TOP_MOD=MX_TOP_MOD,
             MX_SYS_MOD=MX_SYS_MOD,
             child_cimports=self.child_cimports,
             class_defs=self.class_defs
