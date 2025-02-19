@@ -201,7 +201,7 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
 def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path):
 
     modules_str = textwrap.indent(",\n".join(
-        ['"' + str(s) + '"' for s in modules]
+        ['"' + s.as_posix() + '"' for s in modules]
     ), " " * 8)
 
     setup_script = textwrap.dedent("""\
