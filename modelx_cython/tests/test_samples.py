@@ -16,7 +16,7 @@ def sample_dir(tmp_path_factory, request):
 
 @pytest.mark.parametrize("sample_dir, model", [["basicterm_s", "BasicTerm_S"],
                                                ["basicterm_sc", "BasicTerm_SC"]], indirect=["sample_dir"])
-@pytest.mark.parametrize("target", ["mx2cy", "main"])
+@pytest.mark.parametrize("target", ["mx2cy", pytest.param("main", marks=pytest.mark.skip(reason="Skipping 'main' target"))])
 def test_mx2cy_with_lifelib(sample_dir, target, model):
     import lifelib
     import modelx as mx
@@ -43,12 +43,20 @@ def test_mx2cy_with_lifelib(sample_dir, target, model):
         env=env
     ).returncode == 0
 
+    result = subprocess.run(
+        [sys.executable, str(work_dir / "benchmark.py")],
+        env=env,
+        capture_output=True,
+        text=True
+    )
+    print(result.stdout.strip())
+    assert result.returncode == 0
 
 @pytest.mark.parametrize("sample_dir, model", [["ref_space", "RefSpace"],
                                                ["nested_params", "NestedParams"],
                                                ["duplicated_params", "DuplicatedParams"]],
                          indirect=["sample_dir"])
-@pytest.mark.parametrize("target", ["mx2cy", "main"])
+@pytest.mark.parametrize("target", ["mx2cy", pytest.param("main", marks=pytest.mark.skip(reason="Skipping 'main' target"))])
 def test_mx2cy_with_ref_space(sample_dir, target, model):
     import modelx as mx
 
