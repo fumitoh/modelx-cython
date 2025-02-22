@@ -26,7 +26,7 @@ from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.config import TranslationSpec
-from modelx_cython.transformer import SpaceTransformer, SpaceVisitor, PXDGenerator
+from modelx_cython.transformer import SpaceTransformer, ModuleVisitor, PXDGenerator
 
 
 def increment_backups(
@@ -104,7 +104,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             abs_pxd_path = model_path / "/".join(pxd_path)
             abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
 
-            visitor = SpaceVisitor(
+            visitor = ModuleVisitor(
                 module_name=m,
                 source=abs_src_path.read_text(),
                 spec=TranslationSpec(spec),

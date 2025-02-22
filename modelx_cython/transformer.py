@@ -158,7 +158,7 @@ class CombinedRefInfo:
 
 
 
-class SpaceAddin:
+class ParentScopeAddin:
 
     def get_parent(self, node, level=0):
         while level:
@@ -166,18 +166,18 @@ class SpaceAddin:
             level -= 1
         return node
     
-    def get_scope(self, node, level=0):
+    def _get_scope(self, node, level=0):
         return self.get_metadata(ScopeProvider, self.get_parent(node, level=level))
     
     def is_space_scope(self, node, level=0):
-        scope = self.get_scope(node, level)
+        scope = self._get_scope(node, level)
         return bool(
             isinstance(scope, ClassScope)
             and scope.name[: len(SPACE_PREF)] == SPACE_PREF
             and isinstance(scope.parent, GlobalScope)
         )
 
-class SpaceVisitor(m.MatcherDecoratableVisitor, SpaceAddin):
+class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(self, module_name, source, spec, cells_info: dict, ref_info: dict, param_info: dict):
@@ -351,7 +351,7 @@ class PXDGenerator:
     {public_meth_defs}
     """)
 
-    def __init__(self, visitor: SpaceVisitor):
+    def __init__(self, visitor: ModuleVisitor):
         self.module_name = visitor.module_name
         self.classes = visitor.classes
         self.cells_info = visitor.cells_info
@@ -541,12 +541,12 @@ class PXDGenerator:
         return {k: v["size"] for k, v in params.items() if "size" in v}
 
 
-class SpaceTransformer(m.MatcherDecoratableTransformer, SpaceAddin):
+class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(
         self,
-        visitor: SpaceVisitor,
+        visitor: ModuleVisitor,
     ) -> None:
         super().__init__()
         self.module_name = visitor.module_name
