@@ -74,11 +74,11 @@ class LexicalCellsInfo:
 class CombinedCellsInfo(LexicalCellsInfo):
     _runtime_info: RuntimeCellsInfo
 
-    def __init__(self, cellsinfo, typeinfo) -> None:
+    def __init__(self, lex_info, rt_info) -> None:
         super().__init__(
-            cellsinfo.module_name, cellsinfo.cls_name, cellsinfo.name, cellsinfo.params, cellsinfo.spec
+            lex_info.module_name, lex_info.cls_name, lex_info.name, lex_info.params, lex_info.spec
         )
-        self._runtime_info = typeinfo
+        self._runtime_info = rt_info
 
     def has_typeinfo(self):
         return bool(self._runtime_info)
@@ -541,7 +541,7 @@ class PXDGenerator:
         return {k: v["size"] for k, v in params.items() if "size" in v}
 
 
-class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
+class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(
@@ -551,7 +551,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         super().__init__()
         self.module_name = visitor.module_name
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(visitor.source))
-        self.module = self.wrapper.module
+        self._module_node = self.wrapper.module
         self.spec = visitor.spec
         self.cells_info = visitor.cells_info
         self.ref_info = visitor.ref_info
@@ -622,7 +622,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 + cells.name
                                 + ": "
                                 + cells.get_decltype_expr(self.get_arg_sizes(cls_name)),
-                                config=self.module.config_for_parsing,
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                         decl_stmts.append(
@@ -634,14 +634,14 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                     self.get_arg_sizes(cls_name),
                                     rettype_expr=f"{CY_MOD}.{CY_BOOL_T}",
                                 ),
-                                config=self.module.config_for_parsing,
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
                                 VAR_PREF + cells.name + ": dict",
-                                config=self.module.config_for_parsing,
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                 else:
@@ -649,14 +649,14 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     decl_stmts.append(
                         cst.parse_statement(
                             VAR_PREF + cells.name + ": " + rettype,
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
 
                     decl_stmts.append(
                         cst.parse_statement(
                             HAS_PREF + cells.name + ": " + CY_MOD + "." + CY_BOOL_T,
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
 
@@ -667,7 +667,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 stmt = cst.parse_statement(
                     f"{ref.name}: {ref.get_type_expr()}",
-                    config=self.module.config_for_parsing,
+                    config=self._module_node.config_for_parsing,
                 )
                 if is_first:
                     stmt = stmt.with_changes(
@@ -686,7 +686,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 stmt = cst.parse_statement(
                     f"{space}: {rel_path}",
-                    config=self.module.config_for_parsing,
+                    config=self._module_node.config_for_parsing,
                 )
                 if is_first:
                     stmt = stmt.with_changes(
@@ -772,7 +772,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             annotation=cst.Annotation(
                                 annotation=cst.parse_expression(
                                     cells.get_argtype_expr(param_name),
-                                    config=self.module.config_for_parsing,
+                                    config=self._module_node.config_for_parsing,
                                 )
                             )
                         )
@@ -824,7 +824,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     returns = cst.Annotation(
                         annotation=cst.parse_expression(
                             cells.get_rettype_expr(),
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
                     if cells.has_args():
@@ -852,7 +852,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmt = cst.parse_statement(
                     f"base_: {cls_name} = {CY_MOD}.cast({cls_name}, base)",
-                    config=self.module.config_for_parsing,
+                    config=self._module_node.config_for_parsing,
                 )
                 decl_stmt = decl_stmt.with_changes(leading_lines=(cst.EmptyLine(),))
                 stmts = list(cst.ensure_type(updated_node.body, cst.IndentedBlock).body)
@@ -901,7 +901,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     returns = cst.Annotation(
                         annotation=cst.parse_expression(
                             cells.get_rettype_expr(),
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
 
@@ -913,10 +913,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         # Construct indented_block to replace the original one
                         if_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}[{', '.join(cells.params)}]"
                         expr_node = cst.parse_expression(
-                            if_expr, config=self.module.config_for_parsing
+                            if_expr, config=self._module_node.config_for_parsing
                         )
                         stmt_node = cst.parse_statement(
-                            if_expr + " = True", config=self.module.config_for_parsing
+                            if_expr + " = True", config=self._module_node.config_for_parsing
                         )
                         # updated_node.body.body[0].test
                         # FunctionDef.body: IndentedBlock

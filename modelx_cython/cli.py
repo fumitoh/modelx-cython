@@ -26,7 +26,7 @@ from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.config import TranslationSpec
-from modelx_cython.transformer import SpaceTransformer, ModuleVisitor, PXDGenerator
+from modelx_cython.transformer import ModuleTransformer, ModuleVisitor, PXDGenerator
 
 
 def increment_backups(
@@ -113,7 +113,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 param_info=logger.param_info
             )
 
-            trans = SpaceTransformer(visitor=visitor)
+            trans = ModuleTransformer(visitor=visitor)
             pxd = PXDGenerator(visitor=visitor)
 
             abs_src_path.write_text(trans.transformed.code)
