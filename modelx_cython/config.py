@@ -12,7 +12,7 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
-
+from typing import Union, Sequence, Mapping
 from modelx_cython.consts import (
     FILE_PREF,
     GLOBAL_PREF,
@@ -72,4 +72,8 @@ class TranslationSpec:
                     return {}
 
         return data
-    
+
+    def get_arg_sizes(self, module_name: str, cls_name: str) -> Mapping[str, int]:  # TODO: Move to ClassInfo
+        space = self.get_spec(module_name + "." + cls_name)
+        params = space.get(TranslationSpec.CELLS_PARAMS, {})
+        return {k: v[TranslationSpec.SIZE] for k, v in params.items() if TranslationSpec.SIZE in v}
