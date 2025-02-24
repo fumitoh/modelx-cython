@@ -24,9 +24,11 @@ import subprocess
 from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 
 from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
-from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.config import TranslationSpec
-from modelx_cython.transformer import SpaceTransformer, ModuleVisitor, PXDGenerator
+from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
+from modelx_cython.builder import ModuleInfo
+from modelx_cython.parser import ModuleVisitor
+from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 
 
 def increment_backups(
@@ -88,7 +90,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
         logger = run_sample(orig_path, args.sample, new_model_name=model_name)
-        spec = ast.literal_eval(pathlib.Path(args.spec).read_text())
+        spec = TranslationSpec(ast.literal_eval(pathlib.Path(args.spec).read_text()))
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -103,18 +105,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             rel_src_path = rel_model_path / "/".join(subs)
             abs_pxd_path = model_path / "/".join(pxd_path)
             abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
-
-            visitor = ModuleVisitor(
-                module_name=m,
-                source=abs_src_path.read_text(),
-                spec=TranslationSpec(spec),
-                cells_info=logger.cells_info,
-                ref_info=logger.ref_info,
-                param_info=logger.param_info
-            )
-
-            trans = SpaceTransformer(visitor=visitor)
-            pxd = PXDGenerator(visitor=visitor)
+            source = abs_src_path.read_text()
+            visitor = ModuleVisitor(module_name=m, source=source)
+            module_info = ModuleInfo(m, visitor, logger, spec)
+            trans = ModuleTransformer(source, module_info)
+            pxd = PXDGenerator(module_info)
 
             abs_src_path.write_text(trans.transformed.code)
             abs_pxd_path.write_text(pxd.code)

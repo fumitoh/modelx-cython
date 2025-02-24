@@ -17,7 +17,7 @@ try:
     from types import NoneType
 except ImportError: # Python -3.9
     NoneType = type(None)
-from dataclasses import dataclass
+
 import textwrap
 from functools import cached_property
 import libcst as cst
@@ -28,8 +28,8 @@ from libcst._removal_sentinel import RemovalSentinel
 import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 
-from modelx_cython.config import TranslationSpec
-from modelx_cython.tracer import RuntimeCellsInfo, get_type_expr, replace_first_name
+from modelx_cython.parser import ParentScopeAddin
+from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -47,286 +47,6 @@ from modelx_cython.consts import (
     MX_COPY_REFS,
     is_user_defined,
 )
-
-
-class LexicalCellsInfo:
-    module_name: str
-    cls_name: str
-    name: str
-    params: Sequence[str]
-
-    def __init__(self, module_name, cls_name, name, params, spec) -> None:
-        self.module_name: str = module_name
-        self.cls_name: str = cls_name
-        self.name: str = name
-        self.params: Sequence[str] = params
-        self.spec = spec
-
-    @property
-    def fqname(self):
-        pref = "" if self.is_special() else FORMULA_PREF
-        return self.module_name + "." + self.cls_name + "." + pref + self.name
-
-    def is_special(self):
-        return self.name[:2] == self.name[-2:] == "__"
-
-
-class CombinedCellsInfo(LexicalCellsInfo):
-    _runtime_info: RuntimeCellsInfo
-
-    def __init__(self, cellsinfo, typeinfo) -> None:
-        super().__init__(
-            cellsinfo.module_name, cellsinfo.cls_name, cellsinfo.name, cellsinfo.params, cellsinfo.spec
-        )
-        self._runtime_info = typeinfo
-
-    def has_typeinfo(self):
-        return bool(self._runtime_info)
-
-    def has_args(self):
-        return bool(self.params)
-
-    def get_argtype_expr(self, arg: str, with_module=True, use_double=False) -> str:
-        return self._runtime_info.get_argtype_expr(arg, with_module=with_module, use_double=use_double)
-
-    def get_rettype_expr(self, with_module=True, use_double=False):
-
-        ret_t = self.spec.get(TranslationSpec.RET_T)
-        if ret_t:
-            return ret_t
-        elif self.has_typeinfo():
-            return self._runtime_info.get_rettype_expr(with_module=with_module, use_double=use_double)
-        else:
-            return "object"
-
-    def is_arrayable(self, sizes):
-        if self.has_typeinfo():
-            return self._runtime_info.is_arrayable(sizes)
-        else:
-            return False
-
-    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", with_module=True, use_double=False):
-        return self._runtime_info.get_decltype_expr(sizes, rettype_expr=rettype_expr, with_module=with_module, use_double=use_double)
-
-
-@dataclass
-class CombinedRefInfo:
-    module_name: str
-    cls_name: str
-    name: str
-    type_: type = None
-    mx_class: str = ''
-    decl_type_expr: str = ''
-    is_relative: bool = False
-
-    @classmethod
-    def init_with_rt(cls, module_name,
-                        cls_name,
-                        name,
-                        rt_info):
-        if rt_info:
-
-            if rt_info.mx_class:
-                if rt_info.mx_class[:len(module_name)] == module_name:
-                    # Defined in a child space
-                    decl_type_expr = rt_info.mx_class[len(module_name) + 1:]
-                    is_relative = True
-                else:
-                    decl_type_expr = rt_info.mx_class
-                    is_relative = False
-            else:
-                decl_type_expr = ''
-                is_relative = False
-
-            return cls(module_name=module_name,
-                       cls_name=cls_name,
-                       name=name,
-                       type_=rt_info.type_,
-                       mx_class=rt_info.mx_class,
-                       decl_type_expr=decl_type_expr,
-                       is_relative=is_relative)
-        else:
-            return cls(module_name=module_name,
-                       cls_name=cls_name,
-                       name=name)
-
-    def get_type_expr(self, with_module=True, use_double=False):
-        if self.decl_type_expr:
-            return self.decl_type_expr
-        else:
-            return get_type_expr(self.type_, with_module=with_module, use_double=use_double)
-
-
-
-class ParentScopeAddin:
-
-    def get_parent(self, node, level=0):
-        while level:
-            node = self.get_metadata(ParentNodeProvider, node)
-            level -= 1
-        return node
-    
-    def _get_scope(self, node, level=0):
-        return self.get_metadata(ScopeProvider, self.get_parent(node, level=level))
-    
-    def is_space_scope(self, node, level=0):
-        scope = self._get_scope(node, level)
-        return bool(
-            isinstance(scope, ClassScope)
-            and scope.name[: len(SPACE_PREF)] == SPACE_PREF
-            and isinstance(scope.parent, GlobalScope)
-        )
-
-class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
-    METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
-
-    def __init__(self, module_name, source, spec, cells_info: dict, ref_info: dict, param_info: dict):
-        super().__init__()
-        self.module_name = module_name
-        self.source = source
-        self.spec = spec
-        self.cells_info = {}
-        self.ref_info = {}  # {class_name: {name: CombinedRefInfo}}
-        self.classes = []
-        self.spaces = {}    # Parent class name to list of child space names
-        self.cimports = []
-        self._rt_cells_info = cells_info
-        self._rt_ref_info = ref_info
-        self._rt_param_info = param_info
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
-        self.wrapper.visit(self)
-        self._add_params()
-        self._set_cimports()
-
-    def _add_params(self):
-        for cls in self.classes:
-            key = self.module_name + "." + cls
-            params = self._rt_param_info.get(key, None)
-            if params:
-                ref_info = self.ref_info.setdefault(cls, {})
-                for param, rt_info in params.items():
-                    ref_info[param] = CombinedRefInfo.init_with_rt(
-                        module_name=self.module_name,
-                        cls_name=cls,
-                        name=param,
-                        rt_info=rt_info,
-                    )
-
-    def _set_cimports(self):
-        for refs in self.ref_info.values():
-            for r in refs.values():
-                if r.decl_type_expr and not r.is_relative:
-                    mod = ".".join(r.decl_type_expr.split(".")[:-1])
-                    if mod not in self.cimports:
-                        self.cimports.append(mod)
-
-    @m.leave(m.ClassDef())
-    def collect_classes(self, original_node):
-        name = original_node.name.value
-        if name[:len(SPACE_PREF)] == SPACE_PREF:
-            self.classes.append(name)
-
-    @m.call_if_inside(m.ClassDef())
-    @m.call_if_inside(m.FunctionDef(name=cst.Name("__init__")))
-    @m.leave(m.SimpleStatementLine())
-    def collect_space_info(self, original_node):
-        if self.is_space_scope(original_node, level=2):
-            # SimpleStatement in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
-            node = original_node
-
-            # Retrieve class node
-            cls_node = original_node
-            for _ in range(4):
-                cls_node = self.get_metadata(ParentNodeProvider, cls_node)
-            cls_name = cst.ensure_type(cls_node, cst.ClassDef).name.value
-
-            try:
-                target = cst.ensure_type(node.body[0], cst.Assign).targets[0].target
-            except Exception:
-                return
-
-            # Assuming all member assignments in __init__ to names without prefix "_" are child spaces
-            # TODO: Rewrite to a robuster condition. Make modelx.export output child space list
-            if (target.value.value == MX_SELF and is_user_defined(target.attr.value)):
-                self.spaces.setdefault(cls_name, []).append(target.attr.value)
-
-    @m.call_if_inside(m.ClassDef())
-    @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_ASSIGN_REFS)))
-    @m.leave(m.SimpleStatementLine())
-    def collect_refs_info(self, original_node):
-
-        if self.is_space_scope(original_node, level=2):
-            # SimpleStatement in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
-
-            # Retrieve class node
-            cls_node = original_node
-            for _ in range(4):
-                cls_node = self.get_metadata(ParentNodeProvider, cls_node)
-            cls_name = cst.ensure_type(cls_node, cst.ClassDef).name.value
-
-            try:
-                name = cst.ensure_type(
-                    cst.ensure_type(original_node.body[0], cst.Assign).targets[0],
-                    cst.AssignTarget,
-                ).target.attr.value
-            except Exception:   # igonore other than assignments, such as 'pass'
-                return
-
-            rt_info = self._rt_ref_info.get(
-                self.module_name + "." + cls_name + "." + name, None
-            )
-            self.ref_info.setdefault(cls_name, {})[name] = CombinedRefInfo.init_with_rt(
-                self.module_name,
-                cls_name,
-                name,
-                rt_info=rt_info
-            )
-
-    @m.call_if_inside(m.ClassDef())
-    @m.visit(m.FunctionDef())
-    def collect_methods(self, original_node):
-
-        if self.is_space_scope(original_node):
-            cls_name = cst.ensure_type(
-                self.get_parent(original_node, level=2),
-                cst.ClassDef,
-            ).name.value
-
-            if original_node.name.value[: len(FORMULA_PREF)] == FORMULA_PREF:
-                # _f_ methods
-                pass
-            elif original_node.name.value[: len(GLOBAL_PREF)] == GLOBAL_PREF:
-                # _mx_ methods
-                pass
-            elif (
-                original_node.name.value[:2] == "__"
-                and original_node.name.value != "__call__"
-            ):
-                # Special methods
-                pass
-            else:
-                # cells
-                name = original_node.name.value
-                params = [
-                    p.name.value
-                    for p in original_node.params.params
-                    + original_node.params.posonly_params
-                    if p.name.value != MX_SELF
-                ]
-                spec = self.spec.get_spec(self.module_name + "." + cls_name).get("cells", {}).get(name, {})
-
-                ci = LexicalCellsInfo(
-                    module_name=self.module_name,
-                    cls_name=cls_name,
-                    name=name,
-                    params=params,
-                    spec=spec
-                )
-                self.cells_info.setdefault(cls_name, {})[name] = CombinedCellsInfo(
-                    ci, self._rt_cells_info.get(ci.fqname, None)
-                )
-
-        return False
 
 
 class PXDGenerator:
@@ -351,14 +71,9 @@ class PXDGenerator:
     {public_meth_defs}
     """)
 
-    def __init__(self, visitor: ModuleVisitor):
-        self.module_name = visitor.module_name
-        self.classes = visitor.classes
-        self.cells_info = visitor.cells_info
-        self.ref_info = visitor.ref_info
-        self.spaces = visitor.spaces
-        self.spec = visitor.spec
-        self.cimports = visitor.cimports
+    def __init__(self, module: ModuleInfo):
+        self.module_name = module.module_name
+        self.module = module
 
     @cached_property
     def package(self) -> str:
@@ -367,7 +82,7 @@ class PXDGenerator:
     @cached_property
     def cmodule_imports(self) -> str:
         stmts = []
-        for ci in self.cimports:
+        for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
         return "\n".join(stmts)
 
@@ -385,7 +100,7 @@ class PXDGenerator:
     @cached_property
     def class_defs(self):
         stmts = []
-        for cls in self.classes:
+        for cls in self.module.classes.keys():
             stmts.append(self.a_class_def(cls))
         return "\n\n".join(stmts)
 
@@ -403,18 +118,18 @@ class PXDGenerator:
     @cached_property
     def child_cimports(self):
         # cimports for child spaces
+        parent = ".".join(self.module_name.split(".")[:-1])
         stmts = []
-        for space in self.spaces:
-            parent = ".".join(self.module_name.split(".")[:-1])
-            child = MODULE_PREF + space[len(SPACE_PREF):]   # replace _c_ with _m_
+        for child in self.module.sub_modules:
             stmts.append(f"from cython.cimports.{parent} import {child}\n")
 
         return "".join(stmts)
 
     def private_var_defs(self, cls_name):
 
+        cls_info = self.module.classes[cls_name]
         decl_stmts = []
-        for cells in self.cells_info[cls_name].values():
+        for cells in cls_info.cells.values():
 
             assert cells.module_name == self.module_name
             assert cells.cls_name == cls_name
@@ -423,15 +138,15 @@ class PXDGenerator:
                 continue
 
             if cells.has_args():
-                if cells.is_arrayable(self.get_arg_sizes(cls_name)):
+                if cells.is_arrayable(cls_info.cells_arg_sizes):
 
                     var_name = VAR_PREF + cells.name
-                    var_type = cells.get_decltype_expr(self.get_arg_sizes(cls_name), with_module=False, use_double=True)
+                    var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, with_module=False, use_double=True)
                     decl_stmts.append(f"cdef {var_type} {var_name}\n")
 
                     has_name = HAS_PREF + cells.name
                     has_type = cells.get_decltype_expr(
-                                self.get_arg_sizes(cls_name),
+                                cls_info.cells_arg_sizes,
                                 rettype_expr=CY_BOOL_T, with_module=False, use_double=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
 
@@ -447,7 +162,7 @@ class PXDGenerator:
     def public_var_defs(self, cls_name):
 
         decl_stmts = []
-        for ref in self.ref_info.get(cls_name, {}).values():
+        for ref in self.module.classes[cls_name].refs.values():
 
             assert ref.module_name == self.module_name and ref.cls_name == cls_name
 
@@ -455,7 +170,7 @@ class PXDGenerator:
             decl_stmts.append(stmt)
 
         # Declare child spaces
-        for space in self.spaces.get(cls_name, []):
+        for space in self.module.classes[cls_name].spaces:
             mod_name = MODULE_PREF + cls_name[len(SPACE_PREF):]  # Replace prefix for submodule
             rel_path = mod_name + "." + MX_SPACE_MOD + "." + SPACE_PREF + space
 
@@ -468,8 +183,8 @@ class PXDGenerator:
         self, cls_name: str, cells_name: str
     ) -> str:
 
-        cells = self.cells_info[cls_name][cells_name]
-        params = [f"{cls_name} {MX_SELF}"] # add self first
+        cells = self.module.classes[cls_name].cells[cells_name]
+        params = [f"{cls_name} {MX_SELF}"]  # add self first
 
         # Add parameter type hints
         if cells and cells.has_typeinfo() and cells.has_args():
@@ -485,7 +200,7 @@ class PXDGenerator:
     def private_meth_defs(self, cls_name):
 
         decl_stmts = []
-        for cells in self.cells_info[cls_name].values():
+        for cells in self.module.classes[cls_name].cells.values():
 
             if cells.is_special():
                 continue
@@ -511,7 +226,7 @@ class PXDGenerator:
     def public_meth_defs(self, cls_name):
 
         decl_stmts = []
-        for cells in self.cells_info[cls_name].values():
+        for cells in self.module.classes[cls_name].cells.values():
 
             if cells.is_special():
                 continue
@@ -534,28 +249,20 @@ class PXDGenerator:
 
         return "".join(decl_stmts)
 
-    #TODO: Dupolicate def
-    def get_arg_sizes(self, cls_name: str) -> Mapping[str, int]:
-        space = self.spec.get_spec(self.module_name + "." + cls_name)
-        params = space.get("cells_params", {})
-        return {k: v["size"] for k, v in params.items() if "size" in v}
 
-
-class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
+class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(
         self,
-        visitor: ModuleVisitor,
+        source: str,
+        module: ModuleInfo
     ) -> None:
         super().__init__()
-        self.module_name = visitor.module_name
-        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(visitor.source))
-        self.module = self.wrapper.module
-        self.spec = visitor.spec
-        self.cells_info = visitor.cells_info
-        self.ref_info = visitor.ref_info
-        self.spaces = visitor.spaces
+        self.module_name = module.module_name
+        self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
+        self._module_node = self.wrapper.module
+        self.module = module
 
     @property
     def package(self) -> str:
@@ -565,20 +272,12 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     def transformed(self):
         return self.wrapper.visit(self)
 
-    def get_arg_sizes(self, cls_name: str) -> Mapping[str, int]:
-        space = self.spec.get_spec(self.module_name + "." + cls_name)
-        params = space.get("cells_params", {})
-        return {k: v["size"] for k, v in params.items() if "size" in v}
-
-
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
 
         # cimports for child spaces
+        parent = ".".join(self.module_name.split(".")[:-1])
         stmts = []
-        for space in self.spaces:
-
-            parent = ".".join(self.module_name.split(".")[:-1])
-            child = MODULE_PREF + space[len(SPACE_PREF):]   # replace _c_ with _m_
+        for child in self.module.sub_modules:
             stmts.append(cst.parse_statement(
                 f"from cython.cimports.{parent} import {child}",
                 config=updated_node.config_for_parsing,
@@ -605,8 +304,9 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if cls_name[: len(SPACE_PREF)] == SPACE_PREF and isinstance(
             self.get_metadata(ScopeProvider, original_node), GlobalScope
         ):
+            cls_info = self.module.classes[cls_name]
             decl_stmts = []
-            for cells in self.cells_info[cls_name].values():
+            for cells in cls_info.cells.values():
 
                 assert cells.module_name == self.module_name
                 assert cells.cls_name == cls_name
@@ -615,14 +315,14 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 if cells.has_args():
-                    if cells.is_arrayable(self.get_arg_sizes(cls_name)):
+                    if cells.is_arrayable(cls_info.cells_arg_sizes):
                         decl_stmts.append(
                             cst.parse_statement(
                                 VAR_PREF
                                 + cells.name
                                 + ": "
-                                + cells.get_decltype_expr(self.get_arg_sizes(cls_name)),
-                                config=self.module.config_for_parsing,
+                                + cells.get_decltype_expr(cls_info.cells_arg_sizes),
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                         decl_stmts.append(
@@ -631,17 +331,17 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 + cells.name
                                 + ": "
                                 + cells.get_decltype_expr(
-                                    self.get_arg_sizes(cls_name),
+                                    cls_info.cells_arg_sizes,
                                     rettype_expr=f"{CY_MOD}.{CY_BOOL_T}",
                                 ),
-                                config=self.module.config_for_parsing,
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
                                 VAR_PREF + cells.name + ": dict",
-                                config=self.module.config_for_parsing,
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                 else:
@@ -649,25 +349,25 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     decl_stmts.append(
                         cst.parse_statement(
                             VAR_PREF + cells.name + ": " + rettype,
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
 
                     decl_stmts.append(
                         cst.parse_statement(
                             HAS_PREF + cells.name + ": " + CY_MOD + "." + CY_BOOL_T,
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
 
             is_first = True
-            for ref in self.ref_info.get(cls_name, {}).values():
+            for ref in self.module.classes[cls_name].refs.values():
 
                 assert ref.module_name == self.module_name and ref.cls_name == cls_name
 
                 stmt = cst.parse_statement(
                     f"{ref.name}: {ref.get_type_expr()}",
-                    config=self.module.config_for_parsing,
+                    config=self._module_node.config_for_parsing,
                 )
                 if is_first:
                     stmt = stmt.with_changes(
@@ -679,14 +379,14 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
             # Declare child spaces
             is_first = True
-            for space in self.spaces.get(cls_name, []):
+            for space in self.module.classes[cls_name].spaces:
 
                 mod_name = MODULE_PREF + cls_name[len(SPACE_PREF):]  # Replace prefix for submodule
                 rel_path = mod_name + "." + MX_SPACE_MOD + "." + SPACE_PREF + space
 
                 stmt = cst.parse_statement(
                     f"{space}: {rel_path}",
-                    config=self.module.config_for_parsing,
+                    config=self._module_node.config_for_parsing,
                 )
                 if is_first:
                     stmt = stmt.with_changes(
@@ -756,10 +456,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if name[:len(FORMULA_PREF)] == FORMULA_PREF:
             name = name[len(FORMULA_PREF):]
 
-        if (d := self.cells_info.get(cls_name)):
-            cells = d.get(name)
-        else:
-            cells = None
+        cells = self.module.classes[cls_name].cells[name]
 
         # Add parameter type hints
         if cells and cells.has_typeinfo() and cells.has_args():
@@ -772,7 +469,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             annotation=cst.Annotation(
                                 annotation=cst.parse_expression(
                                     cells.get_argtype_expr(param_name),
-                                    config=self.module.config_for_parsing,
+                                    config=self._module_node.config_for_parsing,
                                 )
                             )
                         )
@@ -805,13 +502,11 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             ).name.value
 
             meth_name = original_node.name.value
+            cls_info = self.module.classes[cls_name]
 
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
-                if (d := self.cells_info.get(cls_name)):
-                    cells = d.get(meth_name[len(FORMULA_PREF):])
-                else:
-                    cells = None
+                cells = cls_info.cells.get(meth_name[len(FORMULA_PREF):])
 
                 decorators = [
                     cst.Decorator(
@@ -824,7 +519,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     returns = cst.Annotation(
                         annotation=cst.parse_expression(
                             cells.get_rettype_expr(),
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
                     if cells.has_args():
@@ -852,7 +547,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmt = cst.parse_statement(
                     f"base_: {cls_name} = {CY_MOD}.cast({cls_name}, base)",
-                    config=self.module.config_for_parsing,
+                    config=self._module_node.config_for_parsing,
                 )
                 decl_stmt = decl_stmt.with_changes(leading_lines=(cst.EmptyLine(),))
                 stmts = list(cst.ensure_type(updated_node.body, cst.IndentedBlock).body)
@@ -869,10 +564,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
             elif meth_name == "__call__":
                 # Special methods
-                if (d := self.cells_info.get(cls_name)):
-                    cells = d.get(meth_name)
-                else:
-                    cells = None
+                cells = cls_info.cells[meth_name]
 
                 if cells and cells.has_typeinfo() and cells.has_args():
                     parameters = self._add_param_type_hints(
@@ -886,7 +578,7 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
             else:
                 # cells
-                cells: CombinedCellsInfo = self.cells_info[cls_name][meth_name]
+                cells: CombinedCellsInfo = cls_info.cells[meth_name]
 
                 decorators = [
                     cst.Decorator(
@@ -901,11 +593,11 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     returns = cst.Annotation(
                         annotation=cst.parse_expression(
                             cells.get_rettype_expr(),
-                            config=self.module.config_for_parsing,
+                            config=self._module_node.config_for_parsing,
                         )
                     )
 
-                    if cells.is_arrayable(self.get_arg_sizes(cls_name)):
+                    if cells.is_arrayable(cls_info.cells_arg_sizes):
                         # Add parameter type hints
                         parameters = self._add_param_type_hints(
                             updated_node, cls_name=cls_name
@@ -913,10 +605,10 @@ class SpaceTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         # Construct indented_block to replace the original one
                         if_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}[{', '.join(cells.params)}]"
                         expr_node = cst.parse_expression(
-                            if_expr, config=self.module.config_for_parsing
+                            if_expr, config=self._module_node.config_for_parsing
                         )
                         stmt_node = cst.parse_statement(
-                            if_expr + " = True", config=self.module.config_for_parsing
+                            if_expr + " = True", config=self._module_node.config_for_parsing
                         )
                         # updated_node.body.body[0].test
                         # FunctionDef.body: IndentedBlock

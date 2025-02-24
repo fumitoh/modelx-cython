@@ -71,7 +71,7 @@ class ValueInfo:
     ndim: int = 0
 
 
-class RuntimeCellsInfo:
+class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     name: str
     module: str
     class_: str
