@@ -32,24 +32,27 @@ from modelx_cython.consts import (
 
 
 class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Runtime and assert shared members match
-    _runtime_info: RuntimeCellsInfo
+    _rt: RuntimeCellsInfo
     _spec: dict
 
     def __init__(self, lex_info, rt_info, spec) -> None:
         super().__init__(
             lex_info.module_name, lex_info.cls_name, lex_info.name, lex_info.params
         )
-        self._runtime_info = rt_info
+        self._rt = rt_info
         self._spec = spec
 
     def has_typeinfo(self):
-        return bool(self._runtime_info)
+        return bool(self._rt)
 
     def has_args(self):
         return bool(self.params)
 
     def get_argtype_expr(self, arg: str, with_module=True, use_double=False) -> str:
-        return self._runtime_info.get_argtype_expr(arg, with_module=with_module, use_double=use_double)
+        if arg in self._rt.arg_types:
+            return get_type_expr(self._rt.arg_types[arg], with_module=with_module, use_double=use_double)
+        else:
+            return ""
 
     def get_rettype_expr(self, with_module=True, use_double=False):
 
@@ -57,20 +60,29 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
         if ret_t:
             return ret_t
         elif self.has_typeinfo():
-            return self._runtime_info.get_rettype_expr(with_module=with_module, use_double=use_double)
+            val_t = get_type_expr(self._rt.ret_type.value_type, with_module=with_module, use_double=use_double)
+            if self._rt.ret_type.ndim:
+                return val_t + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
+            else:
+                return val_t
         else:
             return "object"
 
     def is_arrayable(self, sizes):
         if self.has_typeinfo():
-            return self._runtime_info.is_arrayable(sizes)
+            return self._rt.is_arrayable(sizes)
         else:
             return False
 
     def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", with_module=True, use_double=False):
-        return self._runtime_info.get_decltype_expr(sizes, rettype_expr=rettype_expr, with_module=with_module,
-                                                    use_double=use_double)
-
+        if not rettype_expr:
+            rettype_expr = self.get_rettype_expr(with_module=with_module, use_double=use_double)
+        return (
+            rettype_expr
+            + "["
+            + ", ".join([str(sizes[arg]) for arg in self._rt.arg_types.keys()])
+            + "]"
+        )
 
 @dataclass
 class CombinedRefInfo:
@@ -144,7 +156,7 @@ class ClassInfo:
         self._init_cells()
         self._init_spaces()
         self._init_refs()
-        self._add_params()
+        self._add_space_params()
 
     def _init_cells(self):
         for name, lex_info in self.visitor.cells_info[self.name].items():
@@ -170,7 +182,7 @@ class ClassInfo:
                 rt_info=rt_info
             )
 
-    def _add_params(self):
+    def _add_space_params(self):
         key = self.module.module_name + "." + self.name
         params = self.logger.param_info.get(key, None)
         if params:

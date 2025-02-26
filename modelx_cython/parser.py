@@ -58,7 +58,6 @@ class LexicalCellsInfo(LexicalBaseMemberInfo):
     def __init__(self, module_name, cls_name, name, params) -> None:
         super().__init__(module_name, cls_name, name)
         self.params: Sequence[str] = params
-        # self.spec = spec
 
     def is_special(self):
         return self.name[:2] == self.name[-2:] == "__"

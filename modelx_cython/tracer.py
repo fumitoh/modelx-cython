@@ -74,45 +74,20 @@ class ValueInfo:
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     name: str
     module: str
-    class_: str
     arg_types: Mapping[str, type]  # without self
     ret_type: ValueInfo
 
     def __init__(self, traces: Sequence[CallTrace]) -> None:
         self.name = traces[0].func.__name__
         self.module = traces[0].func.__module__
-        self.class_ = ".".join(traces[0].func.__qualname__.split(".")[:-1])
         self.arg_types = self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
-
-    def get_argtype_expr(self, arg: str, with_module=True, use_double=False) -> str:
-        if arg in self.arg_types:
-            return get_type_expr(self.arg_types[arg], with_module=with_module, use_double=use_double)
-        else:
-            return ""
-
-    def get_rettype_expr(self, with_module=True, use_double=False) -> str:
-        val_t = get_type_expr(self.ret_type.value_type, with_module=with_module, use_double=use_double)
-        if self.ret_type.ndim:
-            return val_t + "[" + ", ".join(":" * self.ret_type.ndim) + "]"
-        else:
-            return val_t
 
     def is_arrayable(self, sizes: Mapping[str, int]) -> bool:
         return (
             self.has_args()
             and all(t is int for t in self.arg_types.values())
             and set(self.arg_types) == set(sizes)
-        )
-
-    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", with_module=True, use_double=False) -> str:
-        if not rettype_expr:
-            rettype_expr = self.get_rettype_expr(with_module=with_module, use_double=use_double)
-        return (
-            rettype_expr
-            + "["
-            + ", ".join([str(sizes[arg]) for arg in self.arg_types.keys()])
-            + "]"
         )
 
     def has_args(self):
