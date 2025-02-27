@@ -1,5 +1,5 @@
 
-# Copyright (c) 2023 Fumito Hamamura <fumito.ham@gmail.com>
+# Copyright (c) 2023-2025 Fumito Hamamura <fumito.ham@gmail.com>
 
 # This library is free software: you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public

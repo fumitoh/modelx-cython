@@ -83,7 +83,7 @@ modelx-cython requires Python 3.7+.
 
 ## License
 
-Copyright 2023, Fumito Hamamura
+Copyright 2023-2025, Fumito Hamamura
 
 modelx is free software; you can redistribute it and/or
 modify it under the terms of
