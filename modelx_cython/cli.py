@@ -106,7 +106,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             abs_pxd_path = model_path / "/".join(pxd_path)
             abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
             source = abs_src_path.read_text()
-            visitor = ModuleVisitor(module_name=m, source=source)
+            visitor = ModuleVisitor(module=m, source=source)
             module_info = ModuleInfo(m, visitor, logger, spec)
             trans = ModuleTransformer(source, module_info)
             pxd = PXDGenerator(module_info)

@@ -18,7 +18,7 @@ try:
     from types import NoneType
 except ImportError:  # Python -3.9
     NoneType = type(None)
-from dataclasses import dataclass
+
 from functools import cached_property
 
 from modelx_cython.config import TranslationSpec
@@ -35,9 +35,9 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
     _rt: RuntimeCellsInfo
     _spec: dict
 
-    def __init__(self, lex_info, rt_info, spec) -> None:
+    def __init__(self, lx_info, rt_info, spec) -> None:
         super().__init__(
-            lex_info.module_name, lex_info.cls_name, lex_info.name, lex_info.params
+            lx_info.module, lx_info.cls, lx_info.name, lx_info.params
         )
         self._rt = rt_info
         self._spec = spec
@@ -84,29 +84,26 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
             + "]"
         )
 
-@dataclass
+
 class CombinedRefInfo:
-    module_name: str
-    cls_name: str
+    module: str
+    cls: str
     name: str
     type_: type = None
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
 
-    # TODO: Define __init__ similar to CombinedCellsInfo and replace init_with_rt
-
-    @classmethod
-    def init_with_rt(cls, module_name,
-                     cls_name,
-                     name,
-                     rt_info):
+    def __init__(self, module,
+                 cls,
+                 name,
+                 rt_info):
         if rt_info:
 
             if rt_info.mx_class:
-                if rt_info.mx_class[:len(module_name)] == module_name:
+                if rt_info.mx_class[:len(module)] == module:
                     # Defined in a child space
-                    decl_type_expr = rt_info.mx_class[len(module_name) + 1:]
+                    decl_type_expr = rt_info.mx_class[len(module) + 1:]
                     is_relative = True
                 else:
                     decl_type_expr = rt_info.mx_class
@@ -115,17 +112,17 @@ class CombinedRefInfo:
                 decl_type_expr = ''
                 is_relative = False
 
-            return cls(module_name=module_name,
-                       cls_name=cls_name,
-                       name=name,
-                       type_=rt_info.type_,
-                       mx_class=rt_info.mx_class,
-                       decl_type_expr=decl_type_expr,
-                       is_relative=is_relative)
+            self.module = module
+            self.cls = cls
+            self.name = name
+            self.type_ = rt_info.type_
+            self.mx_class = rt_info.mx_class
+            self.decl_type_expr = decl_type_expr
+            self.is_relative = is_relative
         else:
-            return cls(module_name=module_name,
-                       cls_name=cls_name,
-                       name=name)
+            self.module = module
+            self.cls = cls
+            self.name = name
 
     def get_type_expr(self, with_module=True, use_double=False):
         if self.decl_type_expr:
@@ -159,62 +156,63 @@ class ClassInfo:
         self._add_space_params()
 
     def _init_cells(self):
-        for name, lex_info in self.visitor.cells_info[self.name].items():
-            rt_info = self.logger.cells_info.get(lex_info.fqname, None)
+        for name, lx_info in self.visitor.cells_info[self.name].items():
+            rt_info = self.logger.cells_info.get(lx_info.fqname, None)
             self.cells[name] = CombinedCellsInfo(
-                lex_info,
-                rt_info,
-                self.module.spec.get_spec(self.module.module_name + "." + self.name).get(TranslationSpec.CELLS, {}).get(name, {})
+                lx_info, rt_info,
+                self.module.spec.get_spec(self.module.fqname + "." + self.name).get(TranslationSpec.CELLS, {}).get(name, {})
             )
 
     def _init_spaces(self):
         self.spaces.extend(self.visitor.spaces.get(self.name, []))
 
     def _init_refs(self):
-        for name, lex_info in self.visitor.ref_info.get(self.name, {}).items():
+        for name, lx_info in self.visitor.ref_info.get(self.name, {}).items():
             rt_info = self.logger.ref_info.get(
-                lex_info.fqname, None
+                lx_info.fqname, None
             )
-            self.refs[name] = CombinedRefInfo.init_with_rt(
-                self.module.module_name,
+            self.refs[name] = CombinedRefInfo(
+                self.module.fqname,
                 self.name,
                 name,
                 rt_info=rt_info
             )
 
     def _add_space_params(self):
-        key = self.module.module_name + "." + self.name
+        key = self.module.fqname + "." + self.name
         params = self.logger.param_info.get(key, None)
         if params:
             for param, rt_info in params.items():
-                self.refs[param] = CombinedRefInfo.init_with_rt(
-                    module_name=self.module.module_name,
-                    cls_name=self.name,
+                self.refs[param] = CombinedRefInfo(
+                    module=self.module.fqname,
+                    cls=self.name,
                     name=param,
-                    rt_info=rt_info,
+                    rt_info=rt_info
                 )
 
     @cached_property
     def fqname(self):
-        return self.module.module_name + "." + self.name
+        return self.module.fqname + "." + self.name
 
     @cached_property
-    def cells_arg_sizes(self):  # TODO: Define self.spec and use it instead
-        return self.module.spec.get_arg_sizes(self.module.module_name, cls_name=self.name)
+    def cells_arg_sizes(self) -> Mapping[str, int]:
+        space = self.module.spec.get_spec(self.module.fqname + "." + self.name)
+        params = space.get(TranslationSpec.CELLS_PARAMS, {})
+        return {k: v[TranslationSpec.SIZE] for k, v in params.items() if TranslationSpec.SIZE in v}
 
 
 class ModuleInfo:
 
-    module_name: str
+    fqname: str
     visitor: ModuleVisitor
     logger: MxCallTraceLogger
     spec: TranslationSpec
     classes: dict   # class name -> ClassInfo
 
-    def __init__(self, module_name:str, visitor: ModuleVisitor, logger: MxCallTraceLogger,
+    def __init__(self, fqname: str, visitor: ModuleVisitor, logger: MxCallTraceLogger,
                  spec: TranslationSpec):
 
-        self.module_name = module_name
+        self.fqname = fqname
         self.visitor = visitor
         self.logger = logger
         self.spec = spec

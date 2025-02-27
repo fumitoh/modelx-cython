@@ -36,13 +36,13 @@ from modelx_cython.consts import (
 
 
 class LexicalBaseMemberInfo:
-    module_name: str
-    cls_name: str
+    module: str
+    cls: str
     name: str
 
-    def __init__(self, module_name, cls_name, name):
-        self.module_name: str = module_name
-        self.cls_name: str = cls_name
+    def __init__(self, module, cls, name):
+        self.module: str = module
+        self.cls: str = cls
         self.name: str = name
 
     @cached_property
@@ -55,8 +55,8 @@ class LexicalCellsInfo(LexicalBaseMemberInfo):
 
     params: Sequence[str]
 
-    def __init__(self, module_name, cls_name, name, params) -> None:
-        super().__init__(module_name, cls_name, name)
+    def __init__(self, module, cls, name, params) -> None:
+        super().__init__(module, cls, name)
         self.params: Sequence[str] = params
 
     def is_special(self):
@@ -65,7 +65,7 @@ class LexicalCellsInfo(LexicalBaseMemberInfo):
     @cached_property
     def fqname(self):
         pref = "" if self.is_special() else FORMULA_PREF
-        result = self.module_name + "." + self.cls_name + "." + pref + self.name
+        result = self.module + "." + self.cls + "." + pref + self.name
         return result
 
 
@@ -73,7 +73,7 @@ class LexicalRefInfo(LexicalBaseMemberInfo):
 
     @cached_property
     def fqname(self):
-        return self.module_name + "." + self.cls_name + "." + self.name
+        return self.module + "." + self.cls + "." + self.name
 
 
 class ParentScopeAddin:
@@ -99,9 +99,9 @@ class ParentScopeAddin:
 class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
-    def __init__(self, module_name, source):
+    def __init__(self, module, source):
         super().__init__()
-        self.module_name = module_name
+        self.module = module
         self.source = source
         self.cells_info = {}
         self.ref_info = {}  # {class_name: {name: CombinedRefInfo}}
@@ -164,7 +164,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
                 return
 
             self.ref_info.setdefault(cls_name, {})[name] = LexicalRefInfo(
-                self.module_name,
+                self.module,
                 cls_name,
                 name
             )
@@ -202,8 +202,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
                 ]
 
                 ci = LexicalCellsInfo(
-                    module_name=self.module_name,
-                    cls_name=cls_name,
+                    module=self.module,
+                    cls=cls_name,
                     name=name,
                     params=params
                 )

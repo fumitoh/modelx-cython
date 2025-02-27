@@ -72,12 +72,11 @@ class PXDGenerator:
     """)
 
     def __init__(self, module: ModuleInfo):
-        self.module_name = module.module_name
         self.module = module
 
     @cached_property
     def package(self) -> str:
-        return self.module_name.split(".")[0]
+        return self.module.fqname.split(".")[0]
 
     @cached_property
     def cmodule_imports(self) -> str:
@@ -85,7 +84,6 @@ class PXDGenerator:
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
         return "\n".join(stmts)
-
 
     @cached_property
     def code(self):
@@ -118,7 +116,7 @@ class PXDGenerator:
     @cached_property
     def child_cimports(self):
         # cimports for child spaces
-        parent = ".".join(self.module_name.split(".")[:-1])
+        parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
         for child in self.module.sub_modules:
             stmts.append(f"from cython.cimports.{parent} import {child}\n")
@@ -131,8 +129,8 @@ class PXDGenerator:
         decl_stmts = []
         for cells in cls_info.cells.values():
 
-            assert cells.module_name == self.module_name
-            assert cells.cls_name == cls_name
+            assert cells.module == self.module.fqname
+            assert cells.cls == cls_name
 
             if cells.is_special():
                 continue
@@ -164,7 +162,7 @@ class PXDGenerator:
         decl_stmts = []
         for ref in self.module.classes[cls_name].refs.values():
 
-            assert ref.module_name == self.module_name and ref.cls_name == cls_name
+            assert ref.module == self.module.fqname and ref.cls == cls_name
 
             stmt = f"cdef public {ref.get_type_expr(with_module=False, use_double=True)} {ref.name}\n"
             decl_stmts.append(stmt)
@@ -259,23 +257,22 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         module: ModuleInfo
     ) -> None:
         super().__init__()
-        self.module_name = module.module_name
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self._module_node = self.wrapper.module
         self.module = module
 
-    @property
+    @cached_property
     def package(self) -> str:
-        return self.module_name.split(".")[0]
+        return self.module.fqname.split(".")[0]
 
-    @property
+    @cached_property
     def transformed(self):
         return self.wrapper.visit(self)
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
 
         # cimports for child spaces
-        parent = ".".join(self.module_name.split(".")[:-1])
+        parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
         for child in self.module.sub_modules:
             stmts.append(cst.parse_statement(
@@ -308,8 +305,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             decl_stmts = []
             for cells in cls_info.cells.values():
 
-                assert cells.module_name == self.module_name
-                assert cells.cls_name == cls_name
+                assert cells.module == self.module.fqname
+                assert cells.cls == cls_name
 
                 if cells.is_special():
                     continue
@@ -363,7 +360,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             is_first = True
             for ref in self.module.classes[cls_name].refs.values():
 
-                assert ref.module_name == self.module_name and ref.cls_name == cls_name
+                assert ref.module == self.module.fqname and ref.cls == cls_name
 
                 stmt = cst.parse_statement(
                     f"{ref.name}: {ref.get_type_expr()}",
