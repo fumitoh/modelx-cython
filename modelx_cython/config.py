@@ -21,7 +21,7 @@ from modelx_cython.consts import (
 )
 
 
-class TranslationSpec:
+class TransSpec:
 
     SPACES = "spaces"
     SPACE_PARAMS = "space_params"

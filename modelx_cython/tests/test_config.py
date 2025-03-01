@@ -1,6 +1,6 @@
 import pytest
 
-from modelx_cython.config import TranslationSpec
+from modelx_cython.config import TransSpec
 
 
 testdata_nested = {"cells": {"sample": None}}
@@ -19,7 +19,7 @@ class TestConf:
         ["ModelName._mx_class_._c_Projection", "ModelName._mx_class_._m_Projection"],
     )
     def test_get_data(self, obj_path):
-        data = TranslationSpec(testdata).get_spec(obj_path)
+        data = TransSpec(testdata).get_spec(obj_path)
         assert data == testdata_space
 
     @pytest.mark.parametrize(
@@ -30,5 +30,5 @@ class TestConf:
         ],
     )
     def test_get_data2(self, obj_path):
-        data = TranslationSpec(testdata).get_spec(obj_path)
+        data = TransSpec(testdata).get_spec(obj_path)
         assert data == testdata_nested

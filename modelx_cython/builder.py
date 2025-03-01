@@ -21,7 +21,7 @@ except ImportError:  # Python -3.9
 
 from functools import cached_property
 
-from modelx_cython.config import TranslationSpec
+from modelx_cython.config import TransSpec
 from modelx_cython.tracer import RuntimeCellsInfo, get_type_expr, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
 
@@ -56,7 +56,7 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
 
     def get_rettype_expr(self, with_module=True, use_double=False):
 
-        ret_t = self._spec.get(TranslationSpec.RET_T)
+        ret_t = self._spec.get(TransSpec.RET_T)
         if ret_t:
             return ret_t
         elif self.has_typeinfo():
@@ -160,7 +160,7 @@ class ClassInfo:
             rt_info = self.logger.cells_info.get(lx_info.fqname, None)
             self.cells[name] = CombinedCellsInfo(
                 lx_info, rt_info,
-                self.module.spec.get_spec(self.fqname).get(TranslationSpec.CELLS, {}).get(name, {})
+                self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS, {}).get(name, {})
             )
 
     def _init_spaces(self):
@@ -196,8 +196,8 @@ class ClassInfo:
     @cached_property
     def cells_arg_sizes(self) -> Mapping[str, int]:
         space = self.module.spec.get_spec(self.fqname)
-        params = space.get(TranslationSpec.CELLS_PARAMS, {})
-        return {k: v[TranslationSpec.SIZE] for k, v in params.items() if TranslationSpec.SIZE in v}
+        params = space.get(TransSpec.CELLS_PARAMS, {})
+        return {k: v[TransSpec.SIZE] for k, v in params.items() if TransSpec.SIZE in v}
 
 
 class ModuleInfo:
@@ -205,11 +205,11 @@ class ModuleInfo:
     fqname: str
     visitor: ModuleVisitor
     logger: MxCallTraceLogger
-    spec: TranslationSpec
+    spec: TransSpec
     classes: dict   # class name -> ClassInfo
 
     def __init__(self, fqname: str, visitor: ModuleVisitor, logger: MxCallTraceLogger,
-                 spec: TranslationSpec):
+                 spec: TransSpec):
 
         self.fqname = fqname
         self.visitor = visitor
