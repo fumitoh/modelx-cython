@@ -41,7 +41,6 @@ from modelx_cython.monkeytype_tracing import (
     EVENT_CALL,
     EVENT_RETURN,
 )
-from monkeytype.typing import get_type
 
 from modelx_cython.consts import (
     MX_ASSIGN_REFS,
@@ -99,7 +98,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             for arg, val in itertools.islice(
                 trace.arg_vals.items(), 1, None
             ):  # remove self
-                typ = get_type(val, max_typed_dict_size=0)
+                typ = type(val)
                 typs = types.setdefault(arg, [])
                 if typ not in typs:
                     typs.append(typ)
