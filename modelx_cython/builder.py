@@ -160,7 +160,7 @@ class ClassInfo:
             rt_info = self.logger.cells_info.get(lx_info.fqname, None)
             self.cells[name] = CombinedCellsInfo(
                 lx_info, rt_info,
-                self.module.spec.get_spec(self.module.fqname + "." + self.name).get(TranslationSpec.CELLS, {}).get(name, {})
+                self.module.spec.get_spec(self.fqname).get(TranslationSpec.CELLS, {}).get(name, {})
             )
 
     def _init_spaces(self):
@@ -179,8 +179,7 @@ class ClassInfo:
             )
 
     def _add_space_params(self):
-        key = self.module.fqname + "." + self.name
-        params = self.logger.param_info.get(key, None)
+        params = self.logger.param_info.get(self.fqname, None)
         if params:
             for param, rt_info in params.items():
                 self.refs[param] = CombinedRefInfo(
@@ -196,7 +195,7 @@ class ClassInfo:
 
     @cached_property
     def cells_arg_sizes(self) -> Mapping[str, int]:
-        space = self.module.spec.get_spec(self.module.fqname + "." + self.name)
+        space = self.module.spec.get_spec(self.fqname)
         params = space.get(TranslationSpec.CELLS_PARAMS, {})
         return {k: v[TranslationSpec.SIZE] for k, v in params.items() if TranslationSpec.SIZE in v}
 
