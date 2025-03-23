@@ -260,12 +260,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self._module_node = self.wrapper.module
         self.module = module
+        self.package = module.fqname.split(".")[0]
 
-    @cached_property
-    def package(self) -> str:
-        return self.module.fqname.split(".")[0]
-
-    @cached_property
+    @property   # cannot use cached_property in Transformer
     def transformed(self):
         return self.wrapper.visit(self)
 
