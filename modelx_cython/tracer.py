@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from types import FrameType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
+import logging
 
 import numpy as np
 
@@ -62,6 +63,7 @@ if sys.version_info >= (3, 12):
     import opcode
     RETURN_CONST_OPCODE = opcode.opmap["RETURN_CONST"]
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ValueInfo:
