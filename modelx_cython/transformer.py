@@ -136,7 +136,7 @@ class PXDGenerator:
                 continue
 
             if cells.has_args():
-                if cells.is_arrayable(cls_info.cells_arg_sizes):
+                if cells.is_arrayable():
 
                     var_name = VAR_PREF + cells.name
                     var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, with_module=False, use_double=True)
@@ -309,7 +309,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 if cells.has_args():
-                    if cells.is_arrayable(cls_info.cells_arg_sizes):
+                    if cells.is_arrayable():
                         decl_stmts.append(
                             cst.parse_statement(
                                 VAR_PREF
@@ -591,7 +591,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     )
 
-                    if cells.is_arrayable(cls_info.cells_arg_sizes):
+                    if cells.is_arrayable():
                         # Add parameter type hints
                         parameters = self._add_param_type_hints(
                             updated_node, cls_name=cls_name

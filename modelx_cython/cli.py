@@ -90,7 +90,14 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
         logger = run_sample(orig_path, args.sample, new_model_name=model_name)
-        spec = TransSpec(ast.literal_eval(pathlib.Path(args.spec).read_text()))
+        try:
+            d = ast.literal_eval(pathlib.Path(args.spec).read_text())
+        except FileNotFoundError:
+            if not args.allow_spec:
+                raise
+            else:
+                d = {}
+        spec = TransSpec(d)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -188,6 +195,12 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
         help="Perform compilation only (default: False)",
     )
 
+    group.add_argument(
+        "--allow-spec",
+        action="store_true",
+        default=False,
+        help="Make the spec file optional (default: False)"
+    )
 
     args = parser.parse_args(argv)
     return main_handler(args, stdout, stderr)
