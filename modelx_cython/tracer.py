@@ -63,7 +63,7 @@ if sys.version_info >= (3, 12):
     import opcode
     RETURN_CONST_OPCODE = opcode.opmap["RETURN_CONST"]
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 @dataclass
 class ValueInfo:
@@ -76,20 +76,15 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     name: str
     module: str
     arg_types: Mapping[str, type]  # without self
+    max_args: Mapping[str, int]
     ret_type: ValueInfo
 
     def __init__(self, traces: Sequence[CallTrace]) -> None:
         self.name = traces[0].func.__name__
         self.module = traces[0].func.__module__
         self.arg_types = self._init_arg_types(traces)
+        self.max_args = self._get_max_args(traces)
         self.ret_type = self._init_ret_type(traces)
-
-    def is_arrayable(self, sizes: Mapping[str, int]) -> bool:
-        return (
-            self.has_args()
-            and all(t is int for t in self.arg_types.values())
-            and set(self.arg_types) == set(sizes)
-        )
 
     def has_args(self):
         return bool(len(self.arg_types))
@@ -106,6 +101,19 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                     typs.append(typ)
 
         return {arg: self._get_arg_type(typs) for arg, typs in types.items()}
+
+    def _get_max_args(self, traces):
+        result = {}
+        for trace in traces:
+            for arg, val in itertools.islice(
+                trace.arg_vals.items(), 1, None
+            ):  # remove self
+                if issubclass(self.arg_types[arg], numbers.Integral):
+                    if arg not in result or val > result[arg]:
+                        result[arg] = val
+
+        return result
+
 
     def _get_arg_type(self, types: Sequence[type]):
         if len(types) == 1:
@@ -322,9 +330,9 @@ class MxCallTracer(CallTracer):
             elif event == EVENT_RETURN:
                 self.handle_return(frame, arg)
             else:
-                logger.error("Cannot handle event %s", event)
+                _logger.error("Cannot handle event %s", event)
         except Exception:
-            logger.exception("Failed collecting trace")
+            _logger.exception("Failed collecting trace")
         return self
 
 
@@ -366,12 +374,13 @@ class MxCallTraceLogger(CallTraceLogger):
     def flush(self) -> None:
         for k, v in self._traces.items():
 
+            name_split = k.split(".")
             tr0 = v[0]  # First trace
-            if tr0.func.__name__ == MX_ASSIGN_REFS:
+            if name_split[-1] == MX_ASSIGN_REFS:
                 # Extract refs
                 for name, val in tr0.arg_vals[MX_SELF].__dict__.items():
                     if is_user_defined(name):
-                        fqname = ".".join(tr0.funcname.split(".")[:-1] + [name])
+                        fqname = ".".join(name_split[:-1] + [name])
                         self.ref_info[fqname] = RuntimeRefInfo.init_mxobj(val, self.module)
             else:
                 # Extract cells

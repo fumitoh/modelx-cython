@@ -12,6 +12,7 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
+import ctypes
 
 FILE_PREF = "_mx_"
 GLOBAL_PREF = "_mx_"
@@ -38,7 +39,8 @@ ANY_T = "object"
 FLOAT_T = "float"
 CY_BOOL_T = "bint"
 CY_INT_T = "long long"
-CY_INT_T_P = "longlong"     # For Pure Python sysntax
+CY_INT_T_P = "longlong"     # For Pure Python syntax
+CY_INT_C_TYPE = ctypes.c_longlong
 CY_FLOAT_T = "double"
 
 

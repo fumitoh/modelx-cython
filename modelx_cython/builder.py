@@ -1,5 +1,5 @@
 # Copyright (c) 2023-2025 Fumito Hamamura <fumito.ham@gmail.com>
-
+import numbers
 # This library is free software: you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
 # License as published by the Free Software Foundation version 3.
@@ -13,6 +13,7 @@
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
 from typing import Union, Sequence, Mapping
+import logging
 
 try:
     from types import NoneType
@@ -30,15 +31,19 @@ from modelx_cython.consts import (
     MODULE_PREF
 )
 
+_logger = logging.getLogger(__name__)
+
 
 class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Runtime and assert shared members match
+    parent: 'ClassInfo'
     _rt: RuntimeCellsInfo
     _spec: dict
 
-    def __init__(self, lx_info, rt_info, spec) -> None:
+    def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         super().__init__(
             lx_info.module, lx_info.cls, lx_info.name, lx_info.params
         )
+        self.parent = cls_info
         self._rt = rt_info
         self._spec = spec
 
@@ -68,9 +73,16 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
         else:
             return "object"
 
-    def is_arrayable(self, sizes):
-        if self.has_typeinfo():
-            return self._rt.is_arrayable(sizes)
+    def is_arrayable(self):
+        if self.has_args() and self.has_typeinfo():
+            for p in self.params:
+                tp = self._rt.arg_types.get(p, type)
+                if issubclass(tp, numbers.Integral):
+                    assert p in self.parent.cells_arg_sizes
+                    continue
+                else:
+                    return False
+            return True
         else:
             return False
 
@@ -148,6 +160,8 @@ class ClassInfo:
         self.visitor = module.visitor
         self.logger = module.logger
         self.cells = {}
+        self._cells_max_args = {}
+        self._max_arg_cells = {}    # keep cells fqname for logging
         self.refs = {}
         self.spaces = []
         self._init_cells()
@@ -159,9 +173,15 @@ class ClassInfo:
         for name, lx_info in self.visitor.cells_info[self.name].items():
             rt_info = self.logger.cells_info.get(lx_info.fqname, None)
             self.cells[name] = CombinedCellsInfo(
+                self,
                 lx_info, rt_info,
                 self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS, {}).get(name, {})
             )
+            if rt_info:
+                for k, v in rt_info.max_args.items():
+                    if k not in self._cells_max_args or v > self._cells_max_args[k]:
+                        self._cells_max_args[k] = v
+                        self._max_arg_cells[k] = lx_info.fqname
 
     def _init_spaces(self):
         self.spaces.extend(self.visitor.spaces.get(self.name, []))
@@ -195,9 +215,17 @@ class ClassInfo:
 
     @cached_property
     def cells_arg_sizes(self) -> Mapping[str, int]:
-        space = self.module.spec.get_spec(self.fqname)
-        params = space.get(TransSpec.CELLS_PARAMS, {})
-        return {k: v[TransSpec.SIZE] for k, v in params.items() if TransSpec.SIZE in v}
+        params = self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS_PARAMS, {})
+        sizes = {k: v[TransSpec.SIZE] for k, v in params.items() if TransSpec.SIZE in v}
+        for k, v in self._cells_max_args.items():
+            if k in sizes:
+                if v + 1 > sizes[k]:
+                    _logger.info(f"Specified max size of {sizes[k]} for cells parameter {k} in {self.name} is replaced by {v + 1} from {self._max_arg_cells[k]}")
+                    sizes[k] = v + 1
+            else:
+                sizes[k] = v + 1
+
+        return sizes
 
 
 class ModuleInfo:

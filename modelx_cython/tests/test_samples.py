@@ -52,6 +52,7 @@ def test_mx2cy_with_lifelib(sample_dir, target, model):
     print(result.stdout.strip())
     assert result.returncode == 0
 
+
 @pytest.mark.parametrize("sample_dir, model", [["ref_space", "RefSpace"],
                                                ["nested_params", "NestedParams"],
                                                ["duplicated_params", "DuplicatedParams"]],
@@ -81,3 +82,40 @@ def test_mx2cy_with_ref_space(sample_dir, target, model):
         [sys.executable, str(work_dir / "assert_cy.py")],
         env=env
     ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["no_spec", "NoSpec"]],
+                         indirect=["sample_dir"])
+@pytest.mark.parametrize("target", ["mx2cy", pytest.param("main", marks=pytest.mark.skip(reason="Skipping 'main' target"))])
+@pytest.mark.parametrize("allow_spec", [True, False])
+def test_no_spec(sample_dir, target, model, allow_spec):
+    import modelx as mx
+
+    work_dir = sample_dir
+    mx.read_model(work_dir / model).export(work_dir / (model + '_nomx'))
+    del mx.get_models()[model]
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py")]
+
+    if allow_spec:
+        argv.append("--allow-spec")
+
+    if target == "mx2cy":
+        assert subprocess.run(argv, env=env).returncode == int(not allow_spec)
+    elif target == "main":
+        from modelx_cython.cli import main
+        if allow_spec:
+            assert main(argv[1:], sys.stdout, sys.stderr) == int(not allow_spec)
+        else:
+            with pytest.raises(FileNotFoundError):
+                main(argv[1:], sys.stdout, sys.stderr)
+
+    if allow_spec:
+        assert subprocess.run(
+            [sys.executable, str(work_dir / "assert_cy.py")],
+            env=env
+        ).returncode == 0
