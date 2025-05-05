@@ -124,7 +124,8 @@ def test_no_spec(sample_dir, target, model, allow_spec):
 
 @pytest.mark.parametrize("sample_dir, model", [["varying_types_of_args", "VaryingArgTypes"]],
                          indirect=["sample_dir"])
-def test_no_spec(sample_dir, model, caplog):
+def test_varying_arg_types(sample_dir, model, caplog):
+    """int and float numbers are given to the same arg"""
     import modelx as mx
 
     work_dir = sample_dir
@@ -140,3 +141,29 @@ def test_no_spec(sample_dir, model, caplog):
         assert main(argv[1:], sys.stdout, sys.stderr) == 0
 
     assert "varying types given to argument 'i' in VaryingArgTypes_nomx._mx_classes._c_Space1._f_foo: int 1, float 2.0" in caplog.text
+
+
+@pytest.mark.parametrize("sample_dir, model", [["varying_integral_types_of_args", "VaryingIntegralArgTypes"]],
+                         indirect=["sample_dir"])
+def test_varying_integral_arg_types(sample_dir, model, caplog):
+    """int and np.int64 numbers are passed to the same arg"""
+    import modelx as mx
+
+    work_dir = sample_dir
+    mx.read_model(work_dir / model).export(work_dir / (model + '_nomx'))
+    del mx.get_models()[model]
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--allow-spec"]
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
+
+    assert subprocess.run(argv, env=env).returncode == 0
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env
+    ).returncode == 0
+
+    assert "cdef long long[3] _v_foo" in (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
