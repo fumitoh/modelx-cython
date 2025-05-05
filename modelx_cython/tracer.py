@@ -75,54 +75,58 @@ class ValueInfo:
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     name: str
     module: str
-    arg_types: Mapping[str, type]  # without self
-    max_args: Mapping[str, int]
+    arg_types: Dict[str, type]  # without self
+    max_args: Dict[str, int]
     ret_type: ValueInfo
 
     def __init__(self, traces: Sequence[CallTrace]) -> None:
+        self.fqname = traces[0].funcname
         self.name = traces[0].func.__name__
         self.module = traces[0].func.__module__
-        self.arg_types = self._init_arg_types(traces)
-        self.max_args = self._get_max_args(traces)
+        self.arg_types = {}
+        self.max_args = {}
+        self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
 
     def has_args(self):
         return bool(len(self.arg_types))
 
-    def _init_arg_types(self, traces) -> Mapping[str, type]:
-        types: Dict[str, List[type]] = {}
+    def _init_arg_types(self, traces):
+        arg_type_val: Dict[str, dict[type, Any]] = {}
         for trace in traces:
             for arg, val in itertools.islice(
                 trace.arg_vals.items(), 1, None
             ):  # remove self
-                typ = type(val)
-                typs = types.setdefault(arg, [])
-                if typ not in typs:
-                    typs.append(typ)
+                tp = type(val)
+                types = arg_type_val.setdefault(arg, {})
+                if tp not in types:
+                    types[tp] = val
+                elif issubclass(tp, numbers.Integral):
+                    if val > types[tp]:
+                        types[tp] = val
 
-        return {arg: self._get_arg_type(typs) for arg, typs in types.items()}
+        for arg, type_val in arg_type_val.items():
 
-    def _get_max_args(self, traces):
-        result = {}
-        for trace in traces:
-            for arg, val in itertools.islice(
-                trace.arg_vals.items(), 1, None
-            ):  # remove self
-                if issubclass(self.arg_types[arg], numbers.Integral):
-                    if arg not in result or val > result[arg]:
-                        result[arg] = val
+            if len(type_val) == 1:
+                for tp, val in type_val.items():
+                    self.arg_types[arg] = tp
+                    if issubclass(tp, numbers.Integral):
+                        self.max_args[arg] = val
+                    break
+            elif all(issubclass(tp, numbers.Integral) for tp in type_val.keys()):
+                self.arg_types[arg] = numbers.Integral
+                self.max_args[arg] = max(v for v in type_val.values())
 
-        return result
+            elif all(issubclass(tp, str) for tp in type_val.keys()):
+                self.arg_types[arg] = str
 
+            else:
+                if (any(issubclass(tp, numbers.Integral) for tp in type_val.keys()) and
+                        any(not issubclass(tp, numbers.Integral) for tp in type_val.keys())):
+                    msg = ', '.join(k.__name__ + " " + str(v) for k, v in type_val.items())
+                    _logger.info(f"varying types given to argument '{arg}' in {self.fqname}: {msg}")
 
-    def _get_arg_type(self, types: Sequence[type]):
-        if len(types) == 1:
-            return types[0]
-        else:
-            lt = types[0]
-            for rt in types[1:]:
-                lt = comp_and_get_type(lt, rt)
-            return lt
+                self.arg_types[arg] = object
 
     def _init_ret_type(self, traces):
         ret_types = []

@@ -1,3 +1,4 @@
+import logging
 import sys
 import os
 import subprocess
@@ -119,3 +120,23 @@ def test_no_spec(sample_dir, target, model, allow_spec):
             [sys.executable, str(work_dir / "assert_cy.py")],
             env=env
         ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["varying_types_of_args", "VaryingArgTypes"]],
+                         indirect=["sample_dir"])
+def test_no_spec(sample_dir, model, caplog):
+    import modelx as mx
+
+    work_dir = sample_dir
+    mx.read_model(work_dir / model).export(work_dir / (model + '_nomx'))
+    del mx.get_models()[model]
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--allow-spec"]
+
+    with caplog.at_level(logging.INFO):
+        from modelx_cython.cli import main
+        assert main(argv[1:], sys.stdout, sys.stderr) == 0
+
+    assert "varying types given to argument 'i' in VaryingArgTypes_nomx._mx_classes._c_Space1._f_foo: int 1, float 2.0" in caplog.text
