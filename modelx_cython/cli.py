@@ -195,7 +195,7 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
         help="Perform compilation only (default: False)",
     )
 
-    group.add_argument(
+    parser.add_argument(
         "--allow-spec",
         action="store_true",
         default=False,
