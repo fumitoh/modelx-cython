@@ -20,6 +20,7 @@ import shutil
 import runpy
 import ast
 import argparse
+import logging
 import subprocess
 from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
 
@@ -131,6 +132,33 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         return compile_main(work_dir, setup_file)
 
 
+# Mapping from string names to logging levels
+LOG_LEVELS = {
+    'notset': logging.NOTSET,
+    'debug': logging.DEBUG,
+    'info': logging.INFO,
+    'warning': logging.WARNING,
+    'error': logging.ERROR,
+    'critical': logging.CRITICAL
+}
+
+
+# Custom type function for argparse
+def parse_log_level(value):
+    try:
+        # Try interpreting as an integer
+        level = int(value)
+        if level in LOG_LEVELS.values():
+            return level
+        raise ValueError
+    except ValueError:
+        # Try interpreting as a string key
+        level_name = value.lower()
+        if level_name in LOG_LEVELS:
+            return LOG_LEVELS[level_name]
+        raise argparse.ArgumentTypeError(f"Invalid log level: {value}")
+
+
 def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> int:
 
     env = os.environ.copy()
@@ -202,7 +230,17 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
         help="Make the spec file optional (default: False)"
     )
 
+    parser.add_argument(
+        '--log-level',
+        default=logging.WARNING,
+        type=parse_log_level,
+        help='Logging level: NOTSET(0), DEBUG(10), INFO(20), WARNING(30), ERROR(40), CRITICAL(50) (default: WARNING)'
+    )
     args = parser.parse_args(argv)
+
+    # Configure logging
+    logging.basicConfig(level=args.log_level)
+
     return main_handler(args, stdout, stderr)
 
 
