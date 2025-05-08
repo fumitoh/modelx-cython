@@ -137,10 +137,10 @@ def test_varying_arg_types(sample_dir, model, caplog):
 
     assert (result := subprocess.run(argv + ['--log-level', 'INFO'], env=env, capture_output=True, text=True)).returncode == 0
     assert "varying types given to argument 'i' in VaryingArgTypes_nomx._mx_classes._c_Space1._f_foo: int 1, float 2.0" in result.stderr
-    # assert subprocess.run(
-    #     [sys.executable, str(work_dir / "assert_cy.py")],
-    #     env=env
-    # ).returncode == 0
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env
+    ).returncode == 0
 
 
 @pytest.mark.parametrize("sample_dir, model", [["varying_integral_types_of_args", "VaryingIntegralArgTypes"]],

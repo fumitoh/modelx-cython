@@ -633,12 +633,45 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             returns=returns,
                             body=indented_block,
                         )
+                    elif cells.has_args():
+
+                        return updated_node.with_changes(
+                            decorators=decorators,
+                            returns=returns,
+                            body=self._add_dict_assign(meth_name, updated_node)
+                        )
 
                     else:
                         return updated_node.with_changes(
-                            decorators=decorators, returns=returns
+                            decorators=decorators,
+                            returns=returns
                         )
+                elif cells.has_args():
+                    return updated_node.with_changes(
+                        decorators=decorators,
+                        body=self._add_dict_assign(meth_name, updated_node)
+                    )
+
                 else:
-                    return updated_node.with_changes(decorators=decorators)
+                    return updated_node.with_changes(
+                        decorators=decorators
+                    )
 
         return updated_node
+
+    def _add_dict_assign(self, meth_name: str, updated_node) -> cst.IndentedBlock:
+        """Add dict assignment in method
+
+        Example:
+            if self._v_meth is None:
+                self._v_meth = {}
+        """
+        init_stmt = cst.parse_statement(
+            f"if {MX_SELF}.{VAR_PREF}{meth_name} is None:\n    {MX_SELF}.{VAR_PREF}{meth_name} = {{}}",
+            config=self._module_node.config_for_parsing
+        )
+
+        return cst.ensure_type(
+            updated_node.body, cst.IndentedBlock
+        ).with_changes(body=(init_stmt,) + updated_node.body.body)
+
