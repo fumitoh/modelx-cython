@@ -53,19 +53,19 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
     def has_args(self):
         return bool(self.params)
 
-    def get_argtype_expr(self, arg: str, with_module=True, use_double=False) -> str:
+    def get_argtype_expr(self, arg: str, c_style=False) -> str:
         if arg in self._rt.arg_types:
-            return get_type_expr(self._rt.arg_types[arg], with_module=with_module, use_double=use_double)
+            return get_type_expr(self._rt.arg_types[arg], c_style=c_style)
         else:
             return ""
 
-    def get_rettype_expr(self, with_module=True, use_double=False):
+    def get_rettype_expr(self, c_style=False):
 
         ret_t = self._spec.get(TransSpec.RET_T)
         if ret_t:
             return ret_t
         elif self.has_typeinfo():
-            val_t = get_type_expr(self._rt.ret_type.value_type, with_module=with_module, use_double=use_double)
+            val_t = get_type_expr(self._rt.ret_type.value_type, c_style=c_style)
             if self._rt.ret_type.ndim:
                 return val_t + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
             else:
@@ -86,9 +86,9 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
         else:
             return False
 
-    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", with_module=True, use_double=False):
+    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", c_style=False):
         if not rettype_expr:
-            rettype_expr = self.get_rettype_expr(with_module=with_module, use_double=use_double)
+            rettype_expr = self.get_rettype_expr(c_style=c_style)
         return (
             rettype_expr
             + "["
@@ -136,11 +136,11 @@ class CombinedRefInfo:
             self.cls = cls
             self.name = name
 
-    def get_type_expr(self, with_module=True, use_double=False):
+    def get_type_expr(self, c_style=False):
         if self.decl_type_expr:
             return self.decl_type_expr
         else:
-            return get_type_expr(self.type_, with_module=with_module, use_double=use_double)
+            return get_type_expr(self.type_, c_style=c_style)
 
 
 class ClassInfo:

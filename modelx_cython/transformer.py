@@ -139,19 +139,19 @@ class PXDGenerator:
                 if cells.is_arrayable():
 
                     var_name = VAR_PREF + cells.name
-                    var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, with_module=False, use_double=True)
+                    var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, c_style=True)
                     decl_stmts.append(f"cdef {var_type} {var_name}\n")
 
                     has_name = HAS_PREF + cells.name
                     has_type = cells.get_decltype_expr(
                                 cls_info.cells_arg_sizes,
-                                rettype_expr=CY_BOOL_T, with_module=False, use_double=True)
+                                rettype_expr=CY_BOOL_T, c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
 
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
-                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 decl_stmts.append(f"cdef {rettype} {VAR_PREF + cells.name}\n")
                 decl_stmts.append(f"cdef {CY_BOOL_T} {HAS_PREF + cells.name}\n")
 
@@ -164,7 +164,7 @@ class PXDGenerator:
 
             assert ref.module == self.module.fqname and ref.cls == cls_name
 
-            stmt = f"cdef public {ref.get_type_expr(with_module=False, use_double=True)} {ref.name}\n"
+            stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
             decl_stmts.append(stmt)
 
         # Declare child spaces
@@ -187,7 +187,7 @@ class PXDGenerator:
         # Add parameter type hints
         if cells and cells.has_typeinfo() and cells.has_args():
             for param in cells.params:
-                type_ = cells.get_argtype_expr(param, with_module=False, use_double=True)
+                type_ = cells.get_argtype_expr(param, c_style=True)
                 params.append(f"{type_} {param}")
         else:
             for p in cells.params:
@@ -204,7 +204,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
@@ -230,7 +230,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )

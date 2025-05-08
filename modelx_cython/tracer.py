@@ -231,21 +231,18 @@ class RuntimeParamInfo(RuntimeValueInfo):
     pass
 
 
-def get_type_expr(typ, with_module=True, use_double=False):
+def get_type_expr(typ, c_style=False):
 
     if issubclass(typ, numbers.Integral):
-        if with_module:
-            return f"{CY_MOD}.{CY_INT_T_P}"
-        else:
+        if c_style:
             return CY_INT_T
-    elif issubclass(typ, numbers.Real):
-        if use_double:
-            if with_module:
-                return f"{CY_MOD}.double"
-            else:
-                return "double"
         else:
-            return "float"
+            return f"{CY_MOD}.{CY_INT_T_P}"
+    elif issubclass(typ, numbers.Real):
+        if c_style:
+            return "double"
+        else:
+            return f"{CY_MOD}.double"
 
     elif issubclass(typ, str):
         return "str"
