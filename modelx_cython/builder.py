@@ -89,13 +89,11 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
     def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", c_style=False):
         if not rettype_expr:
             rettype_expr = self.get_rettype_expr(c_style=c_style)
+
         return (
             rettype_expr
-            + "["
-            + ", ".join([str(sizes[arg]) for arg in self._rt.arg_types.keys()])
-            + "]"
+            + "".join([f"[{str(sizes[arg])}]" for arg in self._rt.arg_types.keys()])
         )
-
 
 class CombinedRefInfo:
     module: str

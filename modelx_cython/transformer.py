@@ -597,31 +597,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             updated_node, cls_name=cls_name
                         )
                         # Construct indented_block to replace the original one
-                        if_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}[{', '.join(cells.params)}]"
-                        expr_node = cst.parse_expression(
-                            if_expr, config=self._module_node.config_for_parsing
-                        )
-                        stmt_node = cst.parse_statement(
-                            if_expr + " = True", config=self._module_node.config_for_parsing
-                        )
-                        # updated_node.body.body[0].test
-                        # FunctionDef.body: IndentedBlock
-                        # IndentedBlock.body: tuple(If,)
-                        # If.test: Expr
-                        # If.orelse: Else
-                        # Else.body: IndentedBlock
-                        # IndentedBlock.body: tuple(SimpleStatementLine,...)
-                        if_node = cst.ensure_type(updated_node.body.body[0], cst.If)
-                        stmts = list(
-                            cst.ensure_type(if_node.orelse, cst.Else).body.body
-                        )
-                        stmts.insert(-1, stmt_node)
+                        c_idx_expr = ''.join([f"[{p}]" for p in cells.params])
+                        param_expr = f"{', '.join([p for p in cells.params])}"
 
-                        if_node = if_node.with_changes(
-                            test=expr_node,
-                            orelse=if_node.orelse.with_changes(
-                                body=if_node.orelse.body.with_changes(body=stmts)
-                            ),
+                        has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"
+                        v_expr = f"{MX_SELF}.{VAR_PREF}{meth_name}{c_idx_expr}"
+                        f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
+
+                        if_stmt = textwrap.dedent(f"""\
+                        if {has_expr}:
+                            return {v_expr}
+                        else:
+                            val = {f_expr}
+                            {v_expr} = val
+                            {has_expr} = True
+                            return val
+                        """)
+                        if_node = cst.parse_statement(
+                            if_stmt, config=self._module_node.config_for_parsing
                         )
                         indented_block = cst.ensure_type(
                             updated_node.body, cst.IndentedBlock
