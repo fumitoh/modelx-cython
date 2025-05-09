@@ -604,14 +604,20 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         v_expr = f"{MX_SELF}.{VAR_PREF}{meth_name}{c_idx_expr}"
                         f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
 
+                        idx_range = " and ".join(
+                            [f"(0 <= {p} < {cls_info.cells_arg_sizes[p]})" for p in cells.params])
+
                         if_stmt = textwrap.dedent(f"""\
-                        if {has_expr}:
-                            return {v_expr}
+                        if {idx_range}:
+                            if {has_expr}:
+                                return {v_expr}
+                            else:
+                                val = {f_expr}
+                                {v_expr} = val
+                                {has_expr} = True
+                                return val
                         else:
-                            val = {f_expr}
-                            {v_expr} = val
-                            {has_expr} = True
-                            return val
+                            raise IndexError("array index out of range")
                         """)
                         if_node = cst.parse_statement(
                             if_stmt, config=self._module_node.config_for_parsing
