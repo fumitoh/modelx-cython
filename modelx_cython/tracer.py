@@ -53,10 +53,7 @@ from modelx_cython.consts import (
     MX_SYS_MOD,
     BASE_MODEL,
     SPACE_PREF,
-    SPACE_PARAMS,
-    CY_MOD,
-    CY_INT_T,
-    CY_INT_T_P
+    SPACE_PARAMS
 )
 
 if sys.version_info >= (3, 12):
@@ -231,23 +228,7 @@ class RuntimeParamInfo(RuntimeValueInfo):
     pass
 
 
-def get_type_expr(typ, c_style=False):
 
-    if issubclass(typ, numbers.Integral):
-        if c_style:
-            return CY_INT_T
-        else:
-            return f"{CY_MOD}.{CY_INT_T_P}"
-    elif issubclass(typ, numbers.Real):
-        if c_style:
-            return "double"
-        else:
-            return f"{CY_MOD}.double"
-
-    elif issubclass(typ, str):
-        return "str"
-    else:
-        return "object"
 
 
 def replace_first_name(dotted_name: str, name: str):

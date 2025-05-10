@@ -35,13 +35,6 @@ CY_MOD = GLOBAL_PREF + "cy"
 NP_MOD = GLOBAL_PREF + "np"
 PD_MOD = GLOBAL_PREF + "pd"
 
-ANY_T = "object"
-FLOAT_T = "float"
-CY_BOOL_T = "bint"
-CY_INT_T = "long long"
-CY_INT_T_P = "longlong"     # For Pure Python syntax
-CY_INT_C_TYPE = ctypes.c_longlong
-CY_FLOAT_T = "double"
 
 
 def is_user_defined(name: str):

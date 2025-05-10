@@ -42,12 +42,12 @@ from modelx_cython.consts import (
     MX_SELF,
     MX_SYS_MOD,
     MX_SPACE_MOD,
-    CY_BOOL_T,
     MX_ASSIGN_REFS,
     MX_COPY_REFS,
     is_user_defined,
 )
 
+from modelx_cython.typedefs import CY_BOOL_T
 
 class PXDGenerator:
 

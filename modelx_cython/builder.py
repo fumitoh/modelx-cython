@@ -22,8 +22,9 @@ except ImportError:  # Python -3.9
 
 from functools import cached_property
 
+from modelx_cython.typedefs import get_type_expr
 from modelx_cython.config import TransSpec
-from modelx_cython.tracer import RuntimeCellsInfo, get_type_expr, MxCallTraceLogger
+from modelx_cython.tracer import RuntimeCellsInfo, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
 
 from modelx_cython.consts import (
