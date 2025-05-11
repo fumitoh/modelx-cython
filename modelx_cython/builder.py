@@ -31,6 +31,7 @@ from modelx_cython.consts import (
     SPACE_PREF,
     MODULE_PREF
 )
+from modelx_cython.typedefs import str_to_type, normalize_type, is_arrayable
 
 _logger = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
     parent: 'ClassInfo'
     _rt: RuntimeCellsInfo
     _spec: dict
+    _spec_ret_t: str
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         super().__init__(
@@ -47,6 +49,29 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
         self.parent = cls_info
         self._rt = rt_info
         self._spec = spec
+        self._spec_ret_t = spec.get(TransSpec.RET_T, "")
+
+    @cached_property
+    def norm_type(self) -> type:
+
+        if self._spec_ret_t:
+            if self._spec_ret_t in str_to_type:
+                return str_to_type[self._spec_ret_t]
+            else:
+                raise ValueError(f"invalid value for spec '{TransSpec.RET_T}': {self._spec_ret_t}")
+
+        elif self.has_typeinfo():
+            return normalize_type(self._rt.ret_type.value_type)
+
+        else:
+            return object
+
+    @cached_property
+    def has_array_value(self):
+        if self.has_typeinfo():
+            return self._rt.ret_type.is_array
+        return False
+
 
     def has_typeinfo(self):
         return bool(self._rt)
@@ -62,17 +87,14 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
 
     def get_rettype_expr(self, c_style=False):
 
-        ret_t = self._spec.get(TransSpec.RET_T)
-        if ret_t:
-            return ret_t
-        elif self.has_typeinfo():
-            val_t = get_type_expr(self._rt.ret_type.value_type, c_style=c_style)
-            if self._rt.ret_type.ndim:
-                return val_t + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
+        typ = get_type_expr(self.norm_type, c_style=c_style)
+        if self.has_array_value:
+            if is_arrayable(self.norm_type):
+                return typ + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
             else:
-                return val_t
+                return "object"
         else:
-            return "object"
+            return typ
 
     def is_arrayable(self):
         if self.has_args() and self.has_typeinfo():
@@ -83,7 +105,11 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
                     continue
                 else:
                     return False
-            return True
+
+            if is_arrayable(self.norm_type) and not self.has_array_value:
+                return True
+            else:
+                return False
         else:
             return False
 

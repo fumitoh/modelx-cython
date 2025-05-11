@@ -4,9 +4,6 @@ import ctypes
 
 from modelx_cython.consts import CY_MOD
 
-ANY_T = "object"
-FLOAT_T = "float"
-STR_T = "str"
 CY_BOOL_T = "bint"
 CY_INT_T = "long long"
 CY_INT_T_P = "longlong"     # For Pure Python syntax
@@ -14,9 +11,45 @@ CY_INT_C_TYPE = ctypes.c_longlong
 CY_FLOAT_T = "double"
 
 
-def get_type_expr(typ, c_style=False):
+str_to_type = {
+    "bool": bool,
+    "int": numbers.Integral,
+    "float": numbers.Real,
+    "str": str,
+    "object": object
+}
+
+
+def normalize_type(typ: type) -> type:
+
+    if issubclass(typ, bool):
+        return bool
 
     if issubclass(typ, numbers.Integral):
+        return numbers.Integral
+
+    elif issubclass(typ, numbers.Real):
+        return numbers.Real
+
+    elif issubclass(typ, str):
+        return str
+
+    else:
+        return object
+
+
+def is_arrayable(typ: type):
+    return issubclass(typ, numbers.Real)
+
+
+def get_type_expr(typ, c_style=False):
+
+    if issubclass(typ, bool):
+        if c_style:
+            return CY_BOOL_T
+        else:
+            return f"{CY_MOD}.{CY_BOOL_T}"
+    elif issubclass(typ, numbers.Integral):
         if c_style:
             return CY_INT_T
         else:
@@ -28,16 +61,6 @@ def get_type_expr(typ, c_style=False):
             return f"{CY_MOD}.{CY_FLOAT_T}"
 
     elif issubclass(typ, str):
-        return STR_T
+        return "str"
     else:
-        return ANY_T
-
-
-class TypeGroup(enum.IntEnum):
-
-    C_TYPE = 1
-    MEM_VIEW = 2
-    OBJECT = 3
-
-
-
+        return "object"

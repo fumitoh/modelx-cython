@@ -634,8 +634,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     elif cells.has_args():
 
+                        # Add parameter type hints
+                        parameters = self._add_param_type_hints(
+                            updated_node, cls_name=cls_name
+                        )
+
                         return updated_node.with_changes(
                             decorators=decorators,
+                            params=parameters,
                             returns=returns,
                             body=self._add_dict_assign(meth_name, updated_node)
                         )
