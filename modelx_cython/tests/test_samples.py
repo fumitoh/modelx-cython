@@ -163,15 +163,17 @@ def test_varying_integral_arg_types(sample_dir, model):
     assert "cdef long long[3] _v_foo" in (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
 
 
-@pytest.mark.parametrize("sample_dir, model", [["deep_recursion", "DeepRecursion"]],
+@pytest.mark.parametrize("sample_dir, model", [["deep_recursion", "DeepRecursion"],
+                                               ["index_range", "IndexRange"]],
                          indirect=["sample_dir"])
-def test_deep_recursion(sample_dir, model):
+def test_deep_recursion_and_index_range(sample_dir, model):
     """int and np.int64 numbers are passed to the same arg"""
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
-            "--sample", str(work_dir / "sample.py")]
+            "--sample", str(work_dir / "sample.py"),
+            "--allow-spec"]
 
     assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
     assert subprocess.run(
