@@ -182,3 +182,25 @@ def test_deep_recursion_and_index_range(sample_dir, model):
         capture_output=True,
         text=True
     ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["various_types", "VariousTypes"]],
+                         indirect=["sample_dir"])
+@pytest.mark.parametrize("sample, assertion", [['sample.py', 'assert_cy.py'],
+                                               ['no_sample.py', 'assert_cy_no_sample.py']])
+def test_various_types(sample_dir, model, sample, assertion):
+    """int and np.int64 numbers are passed to the same arg"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / sample),
+            "--allow-spec"]
+
+    assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env,
+        capture_output=True,
+        text=True
+    ).returncode == 0

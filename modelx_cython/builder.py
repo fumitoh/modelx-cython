@@ -31,7 +31,7 @@ from modelx_cython.consts import (
     SPACE_PREF,
     MODULE_PREF
 )
-from modelx_cython.typedefs import str_to_type, normalize_type, is_arrayable
+from modelx_cython.typedefs import str_to_type, normalize_type
 
 _logger = logging.getLogger(__name__)
 
@@ -53,25 +53,26 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
 
     @cached_property
     def norm_type(self) -> type:
-
-        if self._spec_ret_t:
-            if self._spec_ret_t in str_to_type:
-                return str_to_type[self._spec_ret_t]
+        if self.has_typeinfo():
+            if self._spec_ret_t:
+                if self._spec_ret_t in str_to_type:
+                    return str_to_type[self._spec_ret_t]
+                else:
+                    raise ValueError(f"invalid value for spec '{TransSpec.RET_T}': {self._spec_ret_t}")
             else:
-                raise ValueError(f"invalid value for spec '{TransSpec.RET_T}': {self._spec_ret_t}")
-
-        elif self.has_typeinfo():
-            return normalize_type(self._rt.ret_type.value_type)
-
+                return normalize_type(self._rt.ret_type.value_type)
         else:
             return object
 
     @cached_property
-    def has_array_value(self):
-        if self.has_typeinfo():
-            return self._rt.ret_type.is_array
-        return False
+    def is_real_value(self):
+        assert self.has_typeinfo()
+        return issubclass(self.norm_type, numbers.Real)
 
+    @cached_property
+    def is_array_returned(self):
+        assert self.has_typeinfo()
+        return self._rt.ret_type.is_array
 
     def has_typeinfo(self):
         return bool(self._rt)
@@ -80,36 +81,41 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
         return bool(self.params)
 
     def get_argtype_expr(self, arg: str, c_style=False) -> str:
-        if arg in self._rt.arg_types:
+        if self.has_typeinfo():
+            assert arg in self._rt.arg_types
             return get_type_expr(self._rt.arg_types[arg], c_style=c_style)
         else:
-            return ""
+            return "object"
 
     def get_rettype_expr(self, c_style=False):
 
-        typ = get_type_expr(self.norm_type, c_style=c_style)
-        if self.has_array_value:
-            if is_arrayable(self.norm_type):
+        if self.has_typeinfo():
+            typ = get_type_expr(self.norm_type, c_style=c_style)
+            if self.is_real_value and self.is_array_returned:
                 return typ + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
             else:
-                return "object"
+                return typ
         else:
-            return typ
+            return "object"
 
-    def is_arrayable(self):
-        if self.has_args() and self.has_typeinfo():
-            for p in self.params:
-                tp = self._rt.arg_types.get(p, type)
-                if issubclass(tp, numbers.Integral):
-                    assert p in self.parent.cells_arg_sizes
-                    continue
-                else:
-                    return False
+    def is_arg_int(self, arg: str):
+        assert self.has_args() and self.has_typeinfo()
+        return issubclass(self._rt.arg_types[arg], numbers.Integral)
 
-            if is_arrayable(self.norm_type) and not self.has_array_value:
-                return True
+    @cached_property
+    def is_int_args(self):
+        assert self.has_args() and self.has_typeinfo()
+        for p in self.params:
+            if self.is_arg_int(p):
+                continue
             else:
                 return False
+        return True
+
+    def is_arrayable(self):
+        assert self.has_args() and self.has_typeinfo()
+        if self.is_int_args and self.is_real_value and not self.is_array_returned:
+            return True
         else:
             return False
 

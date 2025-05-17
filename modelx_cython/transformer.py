@@ -136,7 +136,7 @@ class PXDGenerator:
                 continue
 
             if cells.has_args():
-                if cells.is_arrayable():
+                if cells.has_typeinfo() and cells.is_arrayable():
 
                     var_name = VAR_PREF + cells.name
                     var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, c_style=True)
@@ -309,7 +309,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 if cells.has_args():
-                    if cells.is_arrayable():
+                    if cells.has_typeinfo() and cells.is_arrayable():
                         decl_stmts.append(
                             cst.parse_statement(
                                 VAR_PREF
@@ -390,7 +390,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmts.append(stmt)
 
-
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -453,28 +452,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells = self.module.classes[cls_name].cells[name]
 
         # Add parameter type hints
-        if cells and cells.has_typeinfo() and cells.has_args():
-            updated_params = [funcdef.params.params[0]]  # add self first
-            for param in param_list:
-                param_name = param.name.value
-                if cells.get_argtype_expr(param_name):
-                    updated_params.append(
-                        param.with_changes(
-                            annotation=cst.Annotation(
-                                annotation=cst.parse_expression(
-                                    cells.get_argtype_expr(param_name),
-                                    config=self._module_node.config_for_parsing,
-                                )
+        updated_params = [funcdef.params.params[0]]  # add self first
+        for param in param_list:
+            param_name = param.name.value
+            if cells.get_argtype_expr(param_name):
+                updated_params.append(
+                    param.with_changes(
+                        annotation=cst.Annotation(
+                            annotation=cst.parse_expression(
+                                cells.get_argtype_expr(param_name),
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                     )
-                else:
-                    updated_params.append(param)
+                )
+            else:
+                updated_params.append(param)
 
-            return funcdef.params.with_changes(params=tuple(updated_params))
-
-        return None
-
+        return funcdef.params.with_changes(params=tuple(updated_params))
 
     @m.call_if_inside(m.ClassDef())
     @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_COPY_REFS)))
@@ -509,26 +504,22 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     )
                 ]
-                if cells and cells.has_typeinfo():
-                    returns = cst.Annotation(
-                        annotation=cst.parse_expression(
-                            cells.get_rettype_expr(),
-                            config=self._module_node.config_for_parsing,
-                        )
+                returns = cst.Annotation(
+                    annotation=cst.parse_expression(
+                        cells.get_rettype_expr(),
+                        config=self._module_node.config_for_parsing,
                     )
-                    if cells.has_args():
-                        parameters = self._add_param_type_hints(
-                            updated_node, cls_name=cls_name
-                        )
-                        return updated_node.with_changes(
-                            decorators=decorators, params=parameters, returns=returns
-                        )
-                    else:
-                        return updated_node.with_changes(
-                            decorators=decorators, returns=returns
-                        )
+                )
+                if cells.has_args():
+                    parameters = self._add_param_type_hints(
+                        updated_node, cls_name=cls_name
+                    )
+                    return updated_node.with_changes(
+                        decorators=decorators, params=parameters, returns=returns
+                    )
                 else:
-                    return updated_node.with_changes(decorators=decorators)
+                    return updated_node.with_changes(decorators=decorators, returns=returns)
+
 
             elif meth_name == MX_COPY_REFS:
                 decorators = [
@@ -581,21 +572,20 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     )
                 ]
-
-                if cells.has_typeinfo():
-                    # Return type
-                    returns = cst.Annotation(
-                        annotation=cst.parse_expression(
-                            cells.get_rettype_expr(),
-                            config=self._module_node.config_for_parsing,
-                        )
+                # Return type
+                returns = cst.Annotation(
+                    annotation=cst.parse_expression(
+                        cells.get_rettype_expr(),
+                        config=self._module_node.config_for_parsing,
                     )
+                )
+                if cells.has_args():
+                    # Add parameter type hints
+                    parameters = self._add_param_type_hints(
+                        updated_node, cls_name=cls_name
+                    )
+                    if cells.has_typeinfo() and cells.is_arrayable():
 
-                    if cells.is_arrayable():
-                        # Add parameter type hints
-                        parameters = self._add_param_type_hints(
-                            updated_node, cls_name=cls_name
-                        )
                         # Construct indented_block to replace the original one
                         c_idx_expr = ''.join([f"[{p}]" for p in cells.params])
                         param_expr = f"{', '.join([p for p in cells.params])}"
@@ -632,35 +622,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             returns=returns,
                             body=indented_block,
                         )
-                    elif cells.has_args():
-
-                        # Add parameter type hints
-                        parameters = self._add_param_type_hints(
-                            updated_node, cls_name=cls_name
-                        )
-
+                    else:
                         return updated_node.with_changes(
                             decorators=decorators,
                             params=parameters,
                             returns=returns,
                             body=self._add_dict_assign(meth_name, updated_node)
                         )
-
-                    else:
-                        return updated_node.with_changes(
-                            decorators=decorators,
-                            returns=returns
-                        )
-                elif cells.has_args():
+                else:   # No type info, no arg
                     return updated_node.with_changes(
                         decorators=decorators,
-                        body=self._add_dict_assign(meth_name, updated_node)
+                        returns=returns
                     )
 
-                else:
-                    return updated_node.with_changes(
-                        decorators=decorators
-                    )
 
         return updated_node
 

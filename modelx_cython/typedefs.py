@@ -38,10 +38,6 @@ def normalize_type(typ: type) -> type:
         return object
 
 
-def is_arrayable(typ: type):
-    return issubclass(typ, numbers.Real)
-
-
 def get_type_expr(typ, c_style=False):
 
     if issubclass(typ, bool):
