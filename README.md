@@ -35,21 +35,23 @@ This will create a Python package named "Model_nomx_cy", next to the original "M
 ## Command
 
 ```
-usage: mx2cy [-h] [--sample SAMPLE] [--spec SPEC] [--setup SETUP] [--translate-only | --compile-only] [--allow-spec] model_path
+usage: mx2cy [-h] [--sample SAMPLE] [--spec SPEC] [--setup SETUP] [--translate-only | --compile-only] [--allow-spec] [--log-level LOG_LEVEL] model_path
 
 Translate an exported modelx model into Cython and compile it.
 
 positional arguments:
-  model_path        Path to an exported modelx model to translate into Cython
+  model_path            Path to an exported modelx model to translate into Cython
 
 options:
-  -h, --help        show this help message and exit
-  --sample SAMPLE   Path to a sample file to run for collecting type information (default: sample.py)
-  --spec SPEC       Path to a spec file for setting parameters (default: spec.py)
-  --setup SETUP     Path to a setup file for Cython (default: setup.py)
-  --translate-only  Perform translation only (default: False)
-  --compile-only    Perform compilation only (default: False)
-  --allow-spec      Make the spec file optional (default: False)
+  -h, --help            show this help message and exit
+  --sample SAMPLE       Path to a sample file to run for collecting type information (default: sample.py)
+  --spec SPEC           Path to a spec file for setting parameters (default: spec.py)
+  --setup SETUP         Path to a setup file for Cython (default: setup.py)
+  --translate-only      Perform translation only (default: False)
+  --compile-only        Perform compilation only (default: False)
+  --allow-spec          Make the spec file optional (default: False)
+  --log-level LOG_LEVEL
+                        Logging level: NOTSET(0), DEBUG(10), INFO(20), WARNING(30), ERROR(40), CRITICAL(50) (default: WARNING)
 ```
 
 ## See Also

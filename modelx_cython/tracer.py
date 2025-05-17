@@ -53,10 +53,7 @@ from modelx_cython.consts import (
     MX_SYS_MOD,
     BASE_MODEL,
     SPACE_PREF,
-    SPACE_PARAMS,
-    CY_MOD,
-    CY_INT_T,
-    CY_INT_T_P
+    SPACE_PARAMS
 )
 
 if sys.version_info >= (3, 12):
@@ -65,8 +62,9 @@ if sys.version_info >= (3, 12):
 
 _logger = logging.getLogger(__name__)
 
+
 @dataclass
-class ValueInfo:
+class ReturnTypeInfo:
     value_type: type
     is_array: bool = False
     ndim: int = 0
@@ -75,78 +73,136 @@ class ValueInfo:
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     name: str
     module: str
-    arg_types: Mapping[str, type]  # without self
-    max_args: Mapping[str, int]
-    ret_type: ValueInfo
+    arg_types: Dict[str, type]  # without self
+    max_args: Dict[str, int]
+    ret_type: ReturnTypeInfo
 
     def __init__(self, traces: Sequence[CallTrace]) -> None:
+        self.fqname = traces[0].funcname
         self.name = traces[0].func.__name__
         self.module = traces[0].func.__module__
-        self.arg_types = self._init_arg_types(traces)
-        self.max_args = self._get_max_args(traces)
+        self.arg_types = {}
+        self.max_args = {}
+        self._init_arg_types(traces)
         self.ret_type = self._init_ret_type(traces)
 
     def has_args(self):
         return bool(len(self.arg_types))
 
-    def _init_arg_types(self, traces) -> Mapping[str, type]:
-        types: Dict[str, List[type]] = {}
+    def _init_arg_types(self, traces):
+        arg_type_val: Dict[str, dict[type, Any]] = {}
+
         for trace in traces:
+
             for arg, val in itertools.islice(
                 trace.arg_vals.items(), 1, None
             ):  # remove self
-                typ = type(val)
-                typs = types.setdefault(arg, [])
-                if typ not in typs:
-                    typs.append(typ)
+                tp = type(val)
+                types = arg_type_val.setdefault(arg, {})
+                if tp not in types:
+                    types[tp] = val
+                elif issubclass(tp, numbers.Integral):
+                    if val > types[tp]:
+                        types[tp] = val
 
-        return {arg: self._get_arg_type(typs) for arg, typs in types.items()}
+        for arg, type_val in arg_type_val.items():
 
-    def _get_max_args(self, traces):
-        result = {}
-        for trace in traces:
-            for arg, val in itertools.islice(
-                trace.arg_vals.items(), 1, None
-            ):  # remove self
-                if issubclass(self.arg_types[arg], numbers.Integral):
-                    if arg not in result or val > result[arg]:
-                        result[arg] = val
+            if len(type_val) == 1:
+                for tp, val in type_val.items():
+                    self.arg_types[arg] = tp
+                    if issubclass(tp, numbers.Integral):
+                        self.max_args[arg] = val
+                    break
+            elif all(issubclass(tp, numbers.Integral) for tp in type_val.keys()):
+                self.arg_types[arg] = numbers.Integral
+                self.max_args[arg] = max(v for v in type_val.values())
 
-        return result
+            elif all(issubclass(tp, str) for tp in type_val.keys()):
+                self.arg_types[arg] = str
 
+            else:
+                if (any(issubclass(tp, numbers.Integral) for tp in type_val.keys()) and
+                        any(not issubclass(tp, numbers.Integral) for tp in type_val.keys())):
+                    msg = ', '.join(k.__name__ + " " + str(v) for k, v in type_val.items())
+                    _logger.info(f"varying types given to argument '{arg}' in {self.fqname}: {msg}")
 
-    def _get_arg_type(self, types: Sequence[type]):
-        if len(types) == 1:
-            return types[0]
-        else:
-            lt = types[0]
-            for rt in types[1:]:
-                lt = comp_and_get_type(lt, rt)
-            return lt
+                self.arg_types[arg] = object
 
     def _init_ret_type(self, traces):
-        ret_types = []
+        last_tp = None
+        last_args = None
+        has_last = False
+        was_dtype_logged = False
+        was_ndim_logged = False
+        was_vtype_logged = False
+
+        def get_arg_expr(args):
+            return ", ".join(f"{k}={str(v)}" for k, v in itertools.islice(args.items(), 1, None))
+
         for tr in traces:
-            ret_type = self.get_value_type(tr.ret_val)
-            if ret_type not in ret_types:
-                ret_types.append(ret_type)
+            val = tr.ret_val
+            if isinstance(val, np.ndarray):
+                tp = ReturnTypeInfo(
+                    val.dtype.type, is_array=True, ndim=val.ndim
+                )
+            else:
+                tp = ReturnTypeInfo(type(val))
 
-        if len(ret_types) == 1:
-            return ret_types[0]
-        else:
-            lt = ret_types[0]
-            for rt in ret_types[1:]:
-                lt = comp_and_get_type(lt, rt)
-            return lt
+            if has_last:
+                if last_tp == tp:
+                    continue
+                elif last_tp.is_array and tp.is_array:
+                    if last_tp.ndim == tp.ndim:
+                        assert last_tp.value_type != tp.value_type
+                        if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
+                            last_tp.value_type = numbers.Integral
+                        elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
+                            last_tp.value_type = numbers.Real
+                        else:
+                            if not was_dtype_logged:
+                                # Log varying return types with their arguments
+                                args0 = get_arg_expr(last_args)
+                                args1 = get_arg_expr(tr.arg_vals)
+                                msg0 = f"{last_tp.value_type.__name__} for {args0}"
+                                msg1 = f"{tp.value_type.__name__} for {args1}"
+                                _logger.info(f"varying array types returned from {self.fqname}:{msg0} and {msg1}")
+                                was_dtype_logged = True
 
-    @staticmethod
-    def get_value_type(value):
-        if isinstance(value, np.ndarray):
-            return ValueInfo(
-                normalize_type(value.dtype.type), is_array=True, ndim=value.ndim
-            )
-        else:
-            return ValueInfo(normalize_type(type(value)))
+                            last_tp.value_type = object
+
+                    else:
+                        if not was_ndim_logged:
+                            args0 = get_arg_expr(last_args)
+                            args1 = get_arg_expr(tr.arg_vals)
+                            msg0 = f"{last_tp.ndim} for {args0}"
+                            msg1 = f"{tp.ndim} for {args1}"
+                            _logger.info(f"varying array dimensions returned from {self.fqname}:{msg0} and {msg1}")
+                            was_ndim_logged = True
+
+                        last_tp = ReturnTypeInfo(object)
+
+                elif not last_tp.is_array and not tp.is_array:
+
+                    if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
+                        last_tp.value_type = numbers.Integral
+                    elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
+                        last_tp.value_type = numbers.Real
+                    else:
+                        if not was_vtype_logged:
+                            args0 = get_arg_expr(last_args)
+                            args1 = get_arg_expr(tr.arg_vals)
+                            msg0 = f"{last_tp.value_type.__name__} for {args0}"
+                            msg1 = f"{last_tp.value_type.__name__} for {args1}"
+                            _logger.info(f"varying types returned from {self.fqname}:{msg0} and {msg1}")
+                            was_vtype_logged = True
+                        last_tp.value_type = object
+
+            else:
+                last_tp = tp
+                last_args = tr.arg_vals
+                has_last = True
+
+        return last_tp
 
 
 class RuntimeValueInfo:
@@ -172,68 +228,7 @@ class RuntimeParamInfo(RuntimeValueInfo):
     pass
 
 
-def get_type_expr(typ, with_module=True, use_double=False):
-    if typ is int:
-        if with_module:
-            return f"{CY_MOD}.{CY_INT_T_P}"
-        else:
-            return CY_INT_T
-    elif typ is float:
-        if use_double:
-            if with_module:
-                return f"{CY_MOD}.double"
-            else:
-                return "double"
-        else:
-            return "float"
 
-    elif typ is str:
-        return "str"
-    else:
-        return "object"
-
-
-def normalize_type(typ: type):
-    if issubclass(typ, numbers.Number):
-        if issubclass(typ, numbers.Rational):
-            return int
-        else:
-            return float
-    else:
-        if issubclass(typ, str):
-            return str
-        else:
-            return object
-
-
-def coerce_type(lt: type, rt: type):
-    if issubclass(lt, numbers.Number) and issubclass(rt, numbers.Number):
-        if issubclass(lt, numbers.Rational) and issubclass(rt, numbers.Rational):
-            return int
-        else:
-            return float
-    elif issubclass(lt, str) and issubclass(rt, str):
-        return str
-    else:
-        object
-
-
-def comp_and_get_type(lt: ValueInfo, rt: ValueInfo) -> ValueInfo:
-    assert lt != rt  # must be different types
-
-    if lt.is_array and rt.is_array:
-        if lt.ndim == rt.ndim:
-            return ValueInfo(
-                coerce_type(lt.value_type, rt.value_type), is_array=True, ndim=lt.ndim
-            )
-        else:
-            ValueInfo(object)
-
-    elif not lt.is_array and not lt.is_array:  # both are non-array
-        return ValueInfo(coerce_type(lt.value_type, rt.value_type))
-
-    else:  # lt or rt is array
-        return ValueInfo(object)
 
 
 def replace_first_name(dotted_name: str, name: str):

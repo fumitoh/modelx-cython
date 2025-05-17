@@ -1,3 +1,4 @@
+import logging
 import sys
 import os
 import subprocess
@@ -53,20 +54,27 @@ def test_mx2cy_with_lifelib(sample_dir, target, model):
     assert result.returncode == 0
 
 
+def generate_nomx(work_dir: pathlib.Path, model: str):
+    import modelx as mx
+    mx.read_model(work_dir / model).export(work_dir / (model + '_nomx'))
+    del mx.get_models()[model]
+
+
+def get_env(work_dir: pathlib.Path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    return env
+
+
 @pytest.mark.parametrize("sample_dir, model", [["ref_space", "RefSpace"],
                                                ["nested_params", "NestedParams"],
                                                ["duplicated_params", "DuplicatedParams"]],
                          indirect=["sample_dir"])
 @pytest.mark.parametrize("target", ["mx2cy", pytest.param("main", marks=pytest.mark.skip(reason="Skipping 'main' target"))])
 def test_mx2cy_with_ref_space(sample_dir, target, model):
-    import modelx as mx
 
-    work_dir = sample_dir
-    mx.read_model(work_dir / model).export(work_dir / (model + '_nomx'))
-    del mx.get_models()[model]
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
 
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
             "--spec", str(work_dir / "spec.py"),
@@ -89,14 +97,9 @@ def test_mx2cy_with_ref_space(sample_dir, target, model):
 @pytest.mark.parametrize("target", ["mx2cy", pytest.param("main", marks=pytest.mark.skip(reason="Skipping 'main' target"))])
 @pytest.mark.parametrize("allow_spec", [True, False])
 def test_no_spec(sample_dir, target, model, allow_spec):
-    import modelx as mx
 
-    work_dir = sample_dir
-    mx.read_model(work_dir / model).export(work_dir / (model + '_nomx'))
-    del mx.get_models()[model]
-
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
 
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py")]
@@ -119,3 +122,85 @@ def test_no_spec(sample_dir, target, model, allow_spec):
             [sys.executable, str(work_dir / "assert_cy.py")],
             env=env
         ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["varying_types_of_args", "VaryingArgTypes"]],
+                         indirect=["sample_dir"])
+def test_varying_arg_types(sample_dir, model, caplog):
+    """int and float numbers are given to the same arg"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--allow-spec"]
+
+    assert (result := subprocess.run(argv + ['--log-level', 'INFO'], env=env, capture_output=True, text=True)).returncode == 0
+    assert "varying types given to argument 'i' in VaryingArgTypes_nomx._mx_classes._c_Space1._f_foo: int 1, float 2.0" in result.stderr
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env
+    ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["varying_integral_types_of_args", "VaryingIntegralArgTypes"]],
+                         indirect=["sample_dir"])
+def test_varying_integral_arg_types(sample_dir, model):
+    """int and np.int64 numbers are passed to the same arg"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--allow-spec"]
+
+    assert subprocess.run(argv, env=env).returncode == 0
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env
+    ).returncode == 0
+
+    assert "cdef long long[3] _v_foo" in (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+
+
+@pytest.mark.parametrize("sample_dir, model", [["deep_recursion", "DeepRecursion"],
+                                               ["index_range", "IndexRange"]],
+                         indirect=["sample_dir"])
+def test_deep_recursion_and_index_range(sample_dir, model):
+    """int and np.int64 numbers are passed to the same arg"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--allow-spec"]
+
+    assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env,
+        capture_output=True,
+        text=True
+    ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["various_types", "VariousTypes"]],
+                         indirect=["sample_dir"])
+@pytest.mark.parametrize("sample, assertion", [['sample.py', 'assert_cy.py'],
+                                               ['no_sample.py', 'assert_cy_no_sample.py']])
+def test_various_types(sample_dir, model, sample, assertion):
+    """int and np.int64 numbers are passed to the same arg"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / sample),
+            "--allow-spec"]
+
+    assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env,
+        capture_output=True,
+        text=True
+    ).returncode == 0

@@ -22,14 +22,16 @@ except ImportError:  # Python -3.9
 
 from functools import cached_property
 
+from modelx_cython.typedefs import get_type_expr
 from modelx_cython.config import TransSpec
-from modelx_cython.tracer import RuntimeCellsInfo, get_type_expr, MxCallTraceLogger
+from modelx_cython.tracer import RuntimeCellsInfo, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
 
 from modelx_cython.consts import (
     SPACE_PREF,
     MODULE_PREF
 )
+from modelx_cython.typedefs import str_to_type, normalize_type
 
 _logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
     parent: 'ClassInfo'
     _rt: RuntimeCellsInfo
     _spec: dict
+    _spec_ret_t: str
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         super().__init__(
@@ -46,6 +49,30 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
         self.parent = cls_info
         self._rt = rt_info
         self._spec = spec
+        self._spec_ret_t = spec.get(TransSpec.RET_T, "")
+
+    @cached_property
+    def norm_type(self) -> type:
+        if self.has_typeinfo():
+            if self._spec_ret_t:
+                if self._spec_ret_t in str_to_type:
+                    return str_to_type[self._spec_ret_t]
+                else:
+                    raise ValueError(f"invalid value for spec '{TransSpec.RET_T}': {self._spec_ret_t}")
+            else:
+                return normalize_type(self._rt.ret_type.value_type)
+        else:
+            return object
+
+    @cached_property
+    def is_real_value(self):
+        assert self.has_typeinfo()
+        return issubclass(self.norm_type, numbers.Real)
+
+    @cached_property
+    def is_array_returned(self):
+        assert self.has_typeinfo()
+        return self._rt.ret_type.is_array
 
     def has_typeinfo(self):
         return bool(self._rt)
@@ -53,49 +80,53 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
     def has_args(self):
         return bool(self.params)
 
-    def get_argtype_expr(self, arg: str, with_module=True, use_double=False) -> str:
-        if arg in self._rt.arg_types:
-            return get_type_expr(self._rt.arg_types[arg], with_module=with_module, use_double=use_double)
-        else:
-            return ""
-
-    def get_rettype_expr(self, with_module=True, use_double=False):
-
-        ret_t = self._spec.get(TransSpec.RET_T)
-        if ret_t:
-            return ret_t
-        elif self.has_typeinfo():
-            val_t = get_type_expr(self._rt.ret_type.value_type, with_module=with_module, use_double=use_double)
-            if self._rt.ret_type.ndim:
-                return val_t + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
-            else:
-                return val_t
+    def get_argtype_expr(self, arg: str, c_style=False) -> str:
+        if self.has_typeinfo():
+            assert arg in self._rt.arg_types
+            return get_type_expr(self._rt.arg_types[arg], c_style=c_style)
         else:
             return "object"
 
+    def get_rettype_expr(self, c_style=False):
+
+        if self.has_typeinfo():
+            typ = get_type_expr(self.norm_type, c_style=c_style)
+            if self.is_real_value and self.is_array_returned:
+                return typ + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
+            else:
+                return typ
+        else:
+            return "object"
+
+    def is_arg_int(self, arg: str):
+        assert self.has_args() and self.has_typeinfo()
+        return issubclass(self._rt.arg_types[arg], numbers.Integral)
+
+    @cached_property
+    def is_int_args(self):
+        assert self.has_args() and self.has_typeinfo()
+        for p in self.params:
+            if self.is_arg_int(p):
+                continue
+            else:
+                return False
+        return True
+
     def is_arrayable(self):
-        if self.has_args() and self.has_typeinfo():
-            for p in self.params:
-                tp = self._rt.arg_types.get(p, type)
-                if issubclass(tp, numbers.Integral):
-                    assert p in self.parent.cells_arg_sizes
-                    continue
-                else:
-                    return False
+        assert self.has_args() and self.has_typeinfo()
+        if self.is_int_args and self.is_real_value and not self.is_array_returned:
             return True
         else:
             return False
 
-    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", with_module=True, use_double=False):
+    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", c_style=False):
         if not rettype_expr:
-            rettype_expr = self.get_rettype_expr(with_module=with_module, use_double=use_double)
+            rettype_expr = self.get_rettype_expr(c_style=c_style)
+
         return (
             rettype_expr
-            + "["
-            + ", ".join([str(sizes[arg]) for arg in self._rt.arg_types.keys()])
-            + "]"
+            + "".join([f"[{str(sizes[arg])}]" for arg in self._rt.arg_types.keys()])
         )
-
 
 class CombinedRefInfo:
     module: str
@@ -136,11 +167,11 @@ class CombinedRefInfo:
             self.cls = cls
             self.name = name
 
-    def get_type_expr(self, with_module=True, use_double=False):
+    def get_type_expr(self, c_style=False):
         if self.decl_type_expr:
             return self.decl_type_expr
         else:
-            return get_type_expr(self.type_, with_module=with_module, use_double=use_double)
+            return get_type_expr(self.type_, c_style=c_style)
 
 
 class ClassInfo:

@@ -42,12 +42,12 @@ from modelx_cython.consts import (
     MX_SELF,
     MX_SYS_MOD,
     MX_SPACE_MOD,
-    CY_BOOL_T,
     MX_ASSIGN_REFS,
     MX_COPY_REFS,
     is_user_defined,
 )
 
+from modelx_cython.typedefs import CY_BOOL_T
 
 class PXDGenerator:
 
@@ -136,22 +136,22 @@ class PXDGenerator:
                 continue
 
             if cells.has_args():
-                if cells.is_arrayable():
+                if cells.has_typeinfo() and cells.is_arrayable():
 
                     var_name = VAR_PREF + cells.name
-                    var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, with_module=False, use_double=True)
+                    var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, c_style=True)
                     decl_stmts.append(f"cdef {var_type} {var_name}\n")
 
                     has_name = HAS_PREF + cells.name
                     has_type = cells.get_decltype_expr(
                                 cls_info.cells_arg_sizes,
-                                rettype_expr=CY_BOOL_T, with_module=False, use_double=True)
+                                rettype_expr=CY_BOOL_T, c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
 
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
-                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 decl_stmts.append(f"cdef {rettype} {VAR_PREF + cells.name}\n")
                 decl_stmts.append(f"cdef {CY_BOOL_T} {HAS_PREF + cells.name}\n")
 
@@ -164,7 +164,7 @@ class PXDGenerator:
 
             assert ref.module == self.module.fqname and ref.cls == cls_name
 
-            stmt = f"cdef public {ref.get_type_expr(with_module=False, use_double=True)} {ref.name}\n"
+            stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
             decl_stmts.append(stmt)
 
         # Declare child spaces
@@ -187,7 +187,7 @@ class PXDGenerator:
         # Add parameter type hints
         if cells and cells.has_typeinfo() and cells.has_args():
             for param in cells.params:
-                type_ = cells.get_argtype_expr(param, with_module=False, use_double=True)
+                type_ = cells.get_argtype_expr(param, c_style=True)
                 params.append(f"{type_} {param}")
         else:
             for p in cells.params:
@@ -204,7 +204,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
@@ -230,7 +230,7 @@ class PXDGenerator:
                 continue
 
             if cells and cells.has_typeinfo():
-                rettype = cells.get_rettype_expr(with_module=False, use_double=True)
+                rettype = cells.get_rettype_expr(c_style=True)
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
@@ -309,7 +309,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 if cells.has_args():
-                    if cells.is_arrayable():
+                    if cells.has_typeinfo() and cells.is_arrayable():
                         decl_stmts.append(
                             cst.parse_statement(
                                 VAR_PREF
@@ -390,7 +390,6 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
                 decl_stmts.append(stmt)
 
-
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -453,28 +452,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cells = self.module.classes[cls_name].cells[name]
 
         # Add parameter type hints
-        if cells and cells.has_typeinfo() and cells.has_args():
-            updated_params = [funcdef.params.params[0]]  # add self first
-            for param in param_list:
-                param_name = param.name.value
-                if cells.get_argtype_expr(param_name):
-                    updated_params.append(
-                        param.with_changes(
-                            annotation=cst.Annotation(
-                                annotation=cst.parse_expression(
-                                    cells.get_argtype_expr(param_name),
-                                    config=self._module_node.config_for_parsing,
-                                )
+        updated_params = [funcdef.params.params[0]]  # add self first
+        for param in param_list:
+            param_name = param.name.value
+            if cells.get_argtype_expr(param_name):
+                updated_params.append(
+                    param.with_changes(
+                        annotation=cst.Annotation(
+                            annotation=cst.parse_expression(
+                                cells.get_argtype_expr(param_name),
+                                config=self._module_node.config_for_parsing,
                             )
                         )
                     )
-                else:
-                    updated_params.append(param)
+                )
+            else:
+                updated_params.append(param)
 
-            return funcdef.params.with_changes(params=tuple(updated_params))
-
-        return None
-
+        return funcdef.params.with_changes(params=tuple(updated_params))
 
     @m.call_if_inside(m.ClassDef())
     @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_COPY_REFS)))
@@ -509,26 +504,22 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     )
                 ]
-                if cells and cells.has_typeinfo():
-                    returns = cst.Annotation(
-                        annotation=cst.parse_expression(
-                            cells.get_rettype_expr(),
-                            config=self._module_node.config_for_parsing,
-                        )
+                returns = cst.Annotation(
+                    annotation=cst.parse_expression(
+                        cells.get_rettype_expr(),
+                        config=self._module_node.config_for_parsing,
                     )
-                    if cells.has_args():
-                        parameters = self._add_param_type_hints(
-                            updated_node, cls_name=cls_name
-                        )
-                        return updated_node.with_changes(
-                            decorators=decorators, params=parameters, returns=returns
-                        )
-                    else:
-                        return updated_node.with_changes(
-                            decorators=decorators, returns=returns
-                        )
+                )
+                if cells.has_args():
+                    parameters = self._add_param_type_hints(
+                        updated_node, cls_name=cls_name
+                    )
+                    return updated_node.with_changes(
+                        decorators=decorators, params=parameters, returns=returns
+                    )
                 else:
-                    return updated_node.with_changes(decorators=decorators)
+                    return updated_node.with_changes(decorators=decorators, returns=returns)
+
 
             elif meth_name == MX_COPY_REFS:
                 decorators = [
@@ -581,47 +572,45 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         )
                     )
                 ]
-
-                if cells.has_typeinfo():
-                    # Return type
-                    returns = cst.Annotation(
-                        annotation=cst.parse_expression(
-                            cells.get_rettype_expr(),
-                            config=self._module_node.config_for_parsing,
-                        )
+                # Return type
+                returns = cst.Annotation(
+                    annotation=cst.parse_expression(
+                        cells.get_rettype_expr(),
+                        config=self._module_node.config_for_parsing,
                     )
+                )
+                if cells.has_args():
+                    # Add parameter type hints
+                    parameters = self._add_param_type_hints(
+                        updated_node, cls_name=cls_name
+                    )
+                    if cells.has_typeinfo() and cells.is_arrayable():
 
-                    if cells.is_arrayable():
-                        # Add parameter type hints
-                        parameters = self._add_param_type_hints(
-                            updated_node, cls_name=cls_name
-                        )
                         # Construct indented_block to replace the original one
-                        if_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}[{', '.join(cells.params)}]"
-                        expr_node = cst.parse_expression(
-                            if_expr, config=self._module_node.config_for_parsing
-                        )
-                        stmt_node = cst.parse_statement(
-                            if_expr + " = True", config=self._module_node.config_for_parsing
-                        )
-                        # updated_node.body.body[0].test
-                        # FunctionDef.body: IndentedBlock
-                        # IndentedBlock.body: tuple(If,)
-                        # If.test: Expr
-                        # If.orelse: Else
-                        # Else.body: IndentedBlock
-                        # IndentedBlock.body: tuple(SimpleStatementLine,...)
-                        if_node = cst.ensure_type(updated_node.body.body[0], cst.If)
-                        stmts = list(
-                            cst.ensure_type(if_node.orelse, cst.Else).body.body
-                        )
-                        stmts.insert(-1, stmt_node)
+                        c_idx_expr = ''.join([f"[{p}]" for p in cells.params])
+                        param_expr = f"{', '.join([p for p in cells.params])}"
 
-                        if_node = if_node.with_changes(
-                            test=expr_node,
-                            orelse=if_node.orelse.with_changes(
-                                body=if_node.orelse.body.with_changes(body=stmts)
-                            ),
+                        has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"
+                        v_expr = f"{MX_SELF}.{VAR_PREF}{meth_name}{c_idx_expr}"
+                        f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
+
+                        idx_range = " and ".join(
+                            [f"(0 <= {p} < {cls_info.cells_arg_sizes[p]})" for p in cells.params])
+
+                        if_stmt = textwrap.dedent(f"""\
+                        if {idx_range}:
+                            if {has_expr}:
+                                return {v_expr}
+                            else:
+                                val = {f_expr}
+                                {v_expr} = val
+                                {has_expr} = True
+                                return val
+                        else:
+                            raise IndexError("array index out of range")
+                        """)
+                        if_node = cst.parse_statement(
+                            if_stmt, config=self._module_node.config_for_parsing
                         )
                         indented_block = cst.ensure_type(
                             updated_node.body, cst.IndentedBlock
@@ -633,12 +622,35 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             returns=returns,
                             body=indented_block,
                         )
-
                     else:
                         return updated_node.with_changes(
-                            decorators=decorators, returns=returns
+                            decorators=decorators,
+                            params=parameters,
+                            returns=returns,
+                            body=self._add_dict_assign(meth_name, updated_node)
                         )
-                else:
-                    return updated_node.with_changes(decorators=decorators)
+                else:   # No type info, no arg
+                    return updated_node.with_changes(
+                        decorators=decorators,
+                        returns=returns
+                    )
+
 
         return updated_node
+
+    def _add_dict_assign(self, meth_name: str, updated_node) -> cst.IndentedBlock:
+        """Add dict assignment in method
+
+        Example:
+            if self._v_meth is None:
+                self._v_meth = {}
+        """
+        init_stmt = cst.parse_statement(
+            f"if {MX_SELF}.{VAR_PREF}{meth_name} is None:\n    {MX_SELF}.{VAR_PREF}{meth_name} = {{}}",
+            config=self._module_node.config_for_parsing
+        )
+
+        return cst.ensure_type(
+            updated_node.body, cst.IndentedBlock
+        ).with_changes(body=(init_stmt,) + updated_node.body.body)
+
