@@ -26,11 +26,11 @@ class TransSpec:
     SPACES = "spaces"
     SPACE_PARAMS = "space_params"
     CELLS = "cells"
-    CELLS_PARAMS = "cells_params"
-    SIZE = "size"
+    CELLS_PARAM_SIZE = "cells_param_size"
+    CELLS_PARAMS = "cells_params"   # deprecated
+    SIZE = "size"   # deprecated
     RET_T = "return_type"
     PARAM_T = "param_type"
-
 
     def __init__(self, data: dict) -> None:
         

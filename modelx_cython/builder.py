@@ -255,15 +255,27 @@ class ClassInfo:
 
     @cached_property
     def cells_arg_sizes(self) -> Mapping[Tuple[str], Tuple[int]]:
-        params = self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS_PARAMS, {})
+        # params = self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS_PARAMS, {})
 
-        sizes = {}  # Tuplize 1-arg
-        for k, v in params.items():
-            if TransSpec.SIZE in v:
+        sizes = {}
+        if TransSpec.CELLS_PARAM_SIZE in self.module.spec.get_spec(self.fqname):
+            params = self.module.spec.get_spec(self.fqname)[TransSpec.CELLS_PARAM_SIZE]
+            # Tuplize 1-arg
+            for k, v in params.items():
                 if isinstance(k, tuple):
-                    sizes[k] = v[TransSpec.SIZE]
+                    sizes[k] = v
                 else:
-                    sizes[(k,)] = (v[TransSpec.SIZE],)
+                    sizes[(k,)] = (v,)
+
+        elif TransSpec.CELLS_PARAMS in self.module.spec.get_spec(self.fqname):  # deprecated
+            params = self.module.spec.get_spec(self.fqname)[TransSpec.CELLS_PARAMS]
+            # Tuplize 1-arg
+            for k, v in params.items():
+                if TransSpec.SIZE in v:
+                    if isinstance(k, tuple):
+                        sizes[k] = v[TransSpec.SIZE]
+                    else:
+                        sizes[(k,)] = (v[TransSpec.SIZE],)
 
         for args, maxes in self._cells_max_args.items():
             if args in sizes:

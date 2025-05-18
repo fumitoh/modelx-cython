@@ -234,3 +234,21 @@ def test_array_size(sample_dir, model, spec):
         capture_output=True,
         text=True
     ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["size_spec_change", "SizeSpecChange"]],
+                         indirect=["sample_dir"])
+@pytest.mark.parametrize("spec", ["spec_old.py", "spec_new.py"])
+def test_varying_arg_types(sample_dir, model, spec):
+    """int and float numbers are given to the same arg"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--spec", str(work_dir / spec)]
+
+    assert (result := subprocess.run(argv, env=env, capture_output=True, text=True)).returncode == 0
+    assert subprocess.run([sys.executable, str(work_dir / "assert_cy_old.py")], env=env).returncode == 0
+    assert subprocess.run([sys.executable, str(work_dir / "assert_cy_new.py")], env=env
+                          ).returncode == (1 if spec == 'spec_old.py' else 0)
