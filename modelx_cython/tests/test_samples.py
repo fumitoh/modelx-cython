@@ -204,3 +204,31 @@ def test_various_types(sample_dir, model, sample, assertion):
         capture_output=True,
         text=True
     ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["array_size", "ArraySize"]],
+                         indirect=["sample_dir"])
+@pytest.mark.parametrize("spec", [["--allow-spec"], ["--spec", "spec_large.py"], ["--spec", "spec_small.py"]])
+def test_array_size(sample_dir, model, spec):
+    """int and np.int64 numbers are passed to the same arg"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            # "--sample", str(work_dir / "sample.py"),
+            "--log-level", "INFO"]
+    argv += spec
+
+    assert (result:= subprocess.run(argv, env=env, cwd=work_dir,  capture_output=True, text=True)).returncode == 0
+
+    if spec[-1] == "spec_small.py":
+        assert "INFO:modelx_cython.builder:Specified max size of 6 for cells parameter i in _c_Space1 is replaced by 11 from ArraySize_nomx_cy._mx_classes._c_Space1._f_foo" in result.stderr
+        assert "INFO:modelx_cython.builder:Specified max size of 3 for cells parameter i in _c_Space1 is replaced by 6 from ArraySize_nomx_cy._mx_classes._c_Space1._f_bar" in result.stderr
+        assert "INFO:modelx_cython.builder:Specified max size of 6 for cells parameter j in _c_Space1 is replaced by 11 from ArraySize_nomx_cy._mx_classes._c_Space1._f_bar" in result.stderr
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env,
+        capture_output=True,
+        text=True
+    ).returncode == 0

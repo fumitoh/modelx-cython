@@ -12,7 +12,7 @@ import numbers
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
-from typing import Union, Sequence, Mapping
+from typing import Union, Sequence, Mapping, Dict, Tuple
 import logging
 
 try:
@@ -36,7 +36,7 @@ from modelx_cython.typedefs import str_to_type, normalize_type
 _logger = logging.getLogger(__name__)
 
 
-class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Runtime and assert shared members match
+class CombinedCellsInfo(LexicalCellsInfo):
     parent: 'ClassInfo'
     _rt: RuntimeCellsInfo
     _spec: dict
@@ -119,14 +119,14 @@ class CombinedCellsInfo(LexicalCellsInfo):  # TODO: Inherit both Lexical and Run
         else:
             return False
 
-    def get_decltype_expr(self, sizes: Mapping[str, int], rettype_expr="", c_style=False):
+    def get_array_decl_expr(self, rettype_expr="", c_style=False):
+        assert self.is_arrayable()
         if not rettype_expr:
             rettype_expr = self.get_rettype_expr(c_style=c_style)
 
-        return (
-            rettype_expr
-            + "".join([f"[{str(sizes[arg])}]" for arg in self._rt.arg_types.keys()])
-        )
+        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
+        return rettype_expr + "".join([f"[{str(i)}]" for i in sizes])
+
 
 class CombinedRefInfo:
     module: str
@@ -184,6 +184,8 @@ class ClassInfo:
     refs:   dict  # name -> CombinedRefInfo
     spaces: list
     params: dict  # name -> CombinedRefInfo
+    _cells_max_args: Dict[Tuple[str], Tuple[int]]
+    _max_arg_cells: Dict[Tuple[str], Dict[str, str]]  # {(arg,) : {arg: fqname}}
 
     def __init__(self, name, module):
         self.name = name
@@ -209,10 +211,17 @@ class ClassInfo:
                 self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS, {}).get(name, {})
             )
             if rt_info:
-                for k, v in rt_info.max_args.items():
-                    if k not in self._cells_max_args or v > self._cells_max_args[k]:
-                        self._cells_max_args[k] = v
-                        self._max_arg_cells[k] = lx_info.fqname
+                args = tuple(rt_info.max_args)
+                maxes = tuple(rt_info.max_args.values())
+                if args not in self._cells_max_args:
+                    self._cells_max_args[args] = maxes
+                    self._max_arg_cells[args] = {k: lx_info.fqname for k in args}
+                else:
+                    d = dict(zip(args, self._cells_max_args[args]))
+                    for k, v in rt_info.max_args.items():
+                        if v > d[k]:
+                            d[k] = v
+                            self._max_arg_cells[args][k] = lx_info.fqname
 
     def _init_spaces(self):
         self.spaces.extend(self.visitor.spaces.get(self.name, []))
@@ -245,16 +254,27 @@ class ClassInfo:
         return self.module.fqname + "." + self.name
 
     @cached_property
-    def cells_arg_sizes(self) -> Mapping[str, int]:
+    def cells_arg_sizes(self) -> Mapping[Tuple[str], Tuple[int]]:
         params = self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS_PARAMS, {})
-        sizes = {k: v[TransSpec.SIZE] for k, v in params.items() if TransSpec.SIZE in v}
-        for k, v in self._cells_max_args.items():
-            if k in sizes:
-                if v + 1 > sizes[k]:
-                    _logger.info(f"Specified max size of {sizes[k]} for cells parameter {k} in {self.name} is replaced by {v + 1} from {self._max_arg_cells[k]}")
-                    sizes[k] = v + 1
+
+        sizes = {}  # Tuplize 1-arg
+        for k, v in params.items():
+            if TransSpec.SIZE in v:
+                if isinstance(k, tuple):
+                    sizes[k] = v[TransSpec.SIZE]
+                else:
+                    sizes[(k,)] = (v[TransSpec.SIZE],)
+
+        for args, maxes in self._cells_max_args.items():
+            if args in sizes:
+                d = dict(zip(args, sizes[args]))
+                for k, v in zip(args, maxes):
+                    if v + 1 > d[k]:
+                        _logger.info(f"Specified max size of {d[k]} for cells parameter {k} in {self.name} is replaced by {v + 1} from {self._max_arg_cells[args][k]}")
+                        d[k] = v + 1
+                sizes[args] = tuple(d.values())
             else:
-                sizes[k] = v + 1
+                sizes[args] = tuple(i + 1 for i in maxes)
 
         return sizes
 
