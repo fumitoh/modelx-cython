@@ -91,13 +91,14 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
         logger = run_sample(orig_path, args.sample, new_model_name=model_name)
-        try:
-            d = ast.literal_eval(pathlib.Path(args.spec).read_text())
-        except FileNotFoundError:
-            if not args.allow_spec:
-                raise
-            else:
-                d = {}
+        if args.no_spec:
+            d = {}
+        else:
+            try:
+                d = ast.literal_eval(pathlib.Path(args.spec).read_text())
+            except FileNotFoundError as e:
+                raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
+
         spec = TransSpec(d)
         rel_model_path = model_path.relative_to(model_path.parent)
 
@@ -189,13 +190,22 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
         )
     )
 
-    parser.add_argument(
+    spec_group = parser.add_mutually_exclusive_group()
+
+    spec_group.add_argument(
         "--spec",
         type=str,
         default="spec.py",
         help=(
             "Path to a spec file for setting parameters (default: spec.py)"
         )
+    )
+
+    spec_group.add_argument(
+        "--no-spec",
+        action="store_true",
+        default=False,
+        help="Skip the spec file (default: False)"
     )
 
     parser.add_argument(
@@ -207,27 +217,20 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
         )
     )
 
-    group = parser.add_mutually_exclusive_group()
+    task_group = parser.add_mutually_exclusive_group()
 
-    group.add_argument(
+    task_group.add_argument(
         "--translate-only",
         action="store_true",
         default=False,
         help="Perform translation only (default: False)",
     )
 
-    group.add_argument(
+    task_group.add_argument(
         "--compile-only",
         action="store_true",
         default=False,
         help="Perform compilation only (default: False)",
-    )
-
-    parser.add_argument(
-        "--allow-spec",
-        action="store_true",
-        default=False,
-        help="Make the spec file optional (default: False)"
     )
 
     parser.add_argument(
