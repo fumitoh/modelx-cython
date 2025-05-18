@@ -95,8 +95,8 @@ def test_mx2cy_with_ref_space(sample_dir, target, model):
 @pytest.mark.parametrize("sample_dir, model", [["no_spec", "NoSpec"]],
                          indirect=["sample_dir"])
 @pytest.mark.parametrize("target", ["mx2cy", pytest.param("main", marks=pytest.mark.skip(reason="Skipping 'main' target"))])
-@pytest.mark.parametrize("allow_spec", [True, False])
-def test_no_spec(sample_dir, target, model, allow_spec):
+@pytest.mark.parametrize("no_spec", [True, False])
+def test_no_spec(sample_dir, target, model, no_spec):
 
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
@@ -104,20 +104,20 @@ def test_no_spec(sample_dir, target, model, allow_spec):
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py")]
 
-    if allow_spec:
-        argv.append("--allow-spec")
+    if no_spec:
+        argv.append("--no-spec")
 
     if target == "mx2cy":
-        assert subprocess.run(argv, env=env).returncode == int(not allow_spec)
+        assert subprocess.run(argv, env=env).returncode == int(not no_spec)
     elif target == "main":
         from modelx_cython.cli import main
-        if allow_spec:
-            assert main(argv[1:], sys.stdout, sys.stderr) == int(not allow_spec)
+        if no_spec:
+            assert main(argv[1:], sys.stdout, sys.stderr) == int(not no_spec)
         else:
             with pytest.raises(FileNotFoundError):
                 main(argv[1:], sys.stdout, sys.stderr)
 
-    if allow_spec:
+    if no_spec:
         assert subprocess.run(
             [sys.executable, str(work_dir / "assert_cy.py")],
             env=env
@@ -133,7 +133,7 @@ def test_varying_arg_types(sample_dir, model, caplog):
 
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
-            "--allow-spec"]
+            "--no-spec"]
 
     assert (result := subprocess.run(argv + ['--log-level', 'INFO'], env=env, capture_output=True, text=True)).returncode == 0
     assert "varying types given to argument 'i' in VaryingArgTypes_nomx._mx_classes._c_Space1._f_foo: int 1, float 2.0" in result.stderr
@@ -152,7 +152,7 @@ def test_varying_integral_arg_types(sample_dir, model):
 
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
-            "--allow-spec"]
+            "--no-spec"]
 
     assert subprocess.run(argv, env=env).returncode == 0
     assert subprocess.run(
@@ -163,17 +163,19 @@ def test_varying_integral_arg_types(sample_dir, model):
     assert "cdef long long[3] _v_foo" in (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
 
 
-@pytest.mark.parametrize("sample_dir, model", [["deep_recursion", "DeepRecursion"],
-                                               ["index_range", "IndexRange"]],
+@pytest.mark.parametrize("sample_dir, model, spec", [["deep_recursion", "DeepRecursion", ""],
+                                               ["index_range", "IndexRange", "--no-spec"]],
                          indirect=["sample_dir"])
-def test_deep_recursion_and_index_range(sample_dir, model):
+def test_deep_recursion_and_index_range(sample_dir, model, spec):
     """int and np.int64 numbers are passed to the same arg"""
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
-            "--sample", str(work_dir / "sample.py"),
-            "--allow-spec"]
+            "--sample", str(work_dir / "sample.py")]
+
+    if spec:
+        argv.append(spec)
 
     assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
     assert subprocess.run(
@@ -195,7 +197,7 @@ def test_various_types(sample_dir, model, sample, assertion):
 
     argv = ["mx2cy", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / sample),
-            "--allow-spec"]
+            "--no-spec"]
 
     assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
     assert subprocess.run(
@@ -208,7 +210,7 @@ def test_various_types(sample_dir, model, sample, assertion):
 
 @pytest.mark.parametrize("sample_dir, model", [["array_size", "ArraySize"]],
                          indirect=["sample_dir"])
-@pytest.mark.parametrize("spec", [["--allow-spec"], ["--spec", "spec_large.py"], ["--spec", "spec_small.py"]])
+@pytest.mark.parametrize("spec", [["--no-spec"], ["--spec", "spec_large.py"], ["--spec", "spec_small.py"]])
 def test_array_size(sample_dir, model, spec):
     """int and np.int64 numbers are passed to the same arg"""
     generate_nomx(work_dir := sample_dir, model)
