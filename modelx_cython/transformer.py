@@ -139,12 +139,11 @@ class PXDGenerator:
                 if cells.has_typeinfo() and cells.is_arrayable():
 
                     var_name = VAR_PREF + cells.name
-                    var_type = cells.get_decltype_expr(cls_info.cells_arg_sizes, c_style=True)
+                    var_type = cells.get_array_decl_expr(c_style=True)
                     decl_stmts.append(f"cdef {var_type} {var_name}\n")
 
                     has_name = HAS_PREF + cells.name
-                    has_type = cells.get_decltype_expr(
-                                cls_info.cells_arg_sizes,
+                    has_type = cells.get_array_decl_expr(
                                 rettype_expr=CY_BOOL_T, c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
 
@@ -315,7 +314,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 VAR_PREF
                                 + cells.name
                                 + ": "
-                                + cells.get_decltype_expr(cls_info.cells_arg_sizes),
+                                + cells.get_array_decl_expr(),
                                 config=self._module_node.config_for_parsing,
                             )
                         )
@@ -324,8 +323,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 HAS_PREF
                                 + cells.name
                                 + ": "
-                                + cells.get_decltype_expr(
-                                    cls_info.cells_arg_sizes,
+                                + cells.get_array_decl_expr(
                                     rettype_expr=f"{CY_MOD}.{CY_BOOL_T}",
                                 ),
                                 config=self._module_node.config_for_parsing,
@@ -594,8 +592,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         v_expr = f"{MX_SELF}.{VAR_PREF}{meth_name}{c_idx_expr}"
                         f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
 
+                        args = tuple(cells.params)
+                        size = cls_info.cells_arg_sizes[args]
+
                         idx_range = " and ".join(
-                            [f"(0 <= {p} < {cls_info.cells_arg_sizes[p]})" for p in cells.params])
+                            [f"(0 <= {p} < {i})" for p, i in zip(args, size)])
 
                         if_stmt = textwrap.dedent(f"""\
                         if {idx_range}:
