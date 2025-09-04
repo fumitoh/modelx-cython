@@ -56,7 +56,7 @@ from modelx_cython.consts import (
     SPACE_PARAMS
 )
 
-if sys.version_info >= (3, 12):
+if (3, 12) <= sys.version_info < (3, 14):
     import opcode
     RETURN_CONST_OPCODE = opcode.opmap["RETURN_CONST"]
 
