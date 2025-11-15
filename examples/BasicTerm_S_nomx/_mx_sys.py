@@ -1,3 +1,4 @@
+import sys
 import collections
 import pickle
 from importlib import import_module
@@ -19,6 +20,7 @@ class BaseParent(BaseMxObject):
     _mx_spaces: Dict[str, 'BaseSpace']
     _parent: 'BaseParent'
     _model: 'BaseModel'
+    _name: str
 
     def _mx_walk(self, skip_self: bool = False):
         """Generator yielding spaces in breadth-first order"""
@@ -38,6 +40,8 @@ class BaseParent(BaseMxObject):
 
 class BaseModel(BaseParent):
 
+    path = pathlib.Path(__file__).parent
+
     def _mx_load_io(self):
 
         ios = {}
@@ -45,16 +49,16 @@ class BaseModel(BaseParent):
         if has_io:
             for k, v in _mx_io.ios.items():
                 cls = io_types[v['type']]
-                load_from = pathlib.Path(__file__).parent / k
+                load_from = self.path / k
                 ios[k] = cls(k, load_from, v)
 
             for k, v in _mx_io.iospecs.items():
                 cls = iospec_types[v['type']]
                 io_data[k] = cls(ios[v['io']], v['kwargs']).load_value()
 
-        path = pathlib.Path(__file__).parent / '_mx_pickled'
-        if path.exists():
-            with open(path, mode='rb') as f:
+        p = self.path / '_mx_pickled'
+        if p.exists():
+            with open(p, mode='rb') as f:
                 pickle_data = pickle.load(f)
         else:
             pickle_data = {}
@@ -64,6 +68,20 @@ class BaseModel(BaseParent):
 
 
 class BaseSpace(BaseParent):
+
+    # Instance variables
+    _mx_is_cells_set: bool
+    _mx_cells: dict
+
+    @property
+    def _cells(self):
+        if not self._mx_is_cells_set:
+            for name in getattr(sys.modules[self.__class__.__module__],
+                                "_v_cells_names_" + self._name):
+                self._mx_cells[name] = getattr(self, name)
+            self._mx_is_cells_set = True
+
+        return self._mx_cells
 
 
     def _mx_is_in(self, parent: BaseParent):

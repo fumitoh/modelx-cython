@@ -1,6 +1,54 @@
 from . import _mx_sys
 
 
+
+_v_cells_names_Projection = [
+    'age',
+    'age_at_entry',
+    'check_pv_net_cf',
+    'claim_pp',
+    'claims',
+    'commissions',
+    'disc_factors',
+    'disc_rate_mth',
+    'duration',
+    'expense_acq',
+    'expense_maint',
+    'expenses',
+    'inflation_factor',
+    'inflation_rate',
+    'lapse_rate',
+    'loading_prem',
+    'model_point',
+    'mort_rate',
+    'mort_rate_mth',
+    'net_cf',
+    'net_premium_pp',
+    'policy_term',
+    'pols_death',
+    'pols_if',
+    'pols_if_init',
+    'pols_lapse',
+    'pols_maturity',
+    'premium_pp',
+    'premiums',
+    'proj_len',
+    'pv_claims',
+    'pv_commissions',
+    'pv_expenses',
+    'pv_net_cf',
+    'pv_pols_if',
+    'pv_premiums',
+    'result_cf',
+    'result_pv',
+    'sex',
+    'sum_assured',
+]
+_v_space_params_Projection = [
+    'point_id',
+]
+
+
 class _c_Projection(_mx_sys.BaseSpace):
 
     def __init__(self, parent):
@@ -9,12 +57,15 @@ class _c_Projection(_mx_sys.BaseSpace):
         self._space = self
         self._parent = parent
         self._model = parent._model
+        self._name = "Projection"
 
 
         self._mx_spaces = {
 
         }
 
+        self._mx_cells = {}     # Populated on calling self._cells
+        self._mx_is_cells_set = False
         self._mx_itemspaces = {}
         self._mx_roots = []     # Dynamic Space only
 
@@ -87,9 +138,9 @@ class _c_Projection(_mx_sys.BaseSpace):
     def _mx_assign_refs(self, io_data, pickle_data):
 
         # Reference assignment
-        self.disc_rate_ann = io_data[2327272187344]
-        self.model_point_table = io_data[2327277479632]
-        self.mort_table = io_data[2327272521616]
+        self.disc_rate_ann = io_data[2521927830576]
+        self.model_point_table = io_data[2521927006032]
+        self.mort_table = io_data[2521928518224]
         self.pd = _mx_sys.import_module('pandas')
         self.point_id = 1
         self.np = _mx_sys.import_module('numpy')
@@ -339,7 +390,7 @@ class _c_Projection(_mx_sys.BaseSpace):
            * :func:`mort_rate_mth`
 
         """
-        return self.mort_table.at[self.age(t), str(max(min(5, self.duration(t)),0))]
+        return self.mort_table[str(max(min(5, self.duration(t)),0))][self.age(t)]
 
     def _f_mort_rate_mth(self, t):
         """Monthly mortality rate to be applied at time t
@@ -988,5 +1039,9 @@ class _c_Projection(_mx_sys.BaseSpace):
 
     def __getitem__(self, item):
         return self.__call__(item)
+
+
+    def __delitem__(self, item):
+        del self._mx_itemspaces[item]
 
 

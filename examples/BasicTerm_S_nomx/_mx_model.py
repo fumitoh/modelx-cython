@@ -8,6 +8,7 @@ class _c_BasicTerm_S(_mx_sys.BaseModel):
         # modelx variables
         self._parent = None
         self._model = self
+        self._name = "BasicTerm_S"
 
         # Space assignments
         self.Projection = _mx_classes._c_Projection(self)
