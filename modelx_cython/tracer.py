@@ -285,7 +285,7 @@ class MxCallTracer(CallTracer):
         elif last_opcode == YIELD_VALUE_OPCODE:
             trace.ret_val = arg
         else:
-            if sys.version_info >= (3, 12):
+            if (3, 12) <= sys.version_info < (3, 14):
                 ret_opcodes = (RETURN_VALUE_OPCODE, RETURN_CONST_OPCODE)
             else:
                 ret_opcodes = (RETURN_VALUE_OPCODE,)
