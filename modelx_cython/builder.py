@@ -29,7 +29,8 @@ from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
 
 from modelx_cython.consts import (
     SPACE_PREF,
-    MODULE_PREF
+    MODULE_PREF,
+    CY_MOD
 )
 from modelx_cython.typedefs import str_to_type, normalize_type
 
@@ -92,7 +93,13 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
             if self.is_real_value and self.is_array_returned:
-                return typ + "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
+                # const element type so that read-only arrays, such as those
+                # returned by pandas under copy-on-write, can be coerced
+                suffix = "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
+                if c_style:
+                    return "const " + typ + suffix
+                else:
+                    return f"{CY_MOD}.const[{typ}]" + suffix
             else:
                 return typ
         else:
