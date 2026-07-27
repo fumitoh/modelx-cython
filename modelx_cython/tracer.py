@@ -135,6 +135,7 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         was_dtype_logged = False
         was_ndim_logged = False
         was_vtype_logged = False
+        was_mixed_logged = False
 
         def get_arg_expr(args):
             return ", ".join(f"{k}={str(v)}" for k, v in itertools.islice(args.items(), 1, None))
@@ -192,10 +193,21 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                             args0 = get_arg_expr(last_args)
                             args1 = get_arg_expr(tr.arg_vals)
                             msg0 = f"{last_tp.value_type.__name__} for {args0}"
-                            msg1 = f"{last_tp.value_type.__name__} for {args1}"
+                            msg1 = f"{tp.value_type.__name__} for {args1}"
                             _logger.info(f"varying types returned from {self.fqname}:{msg0} and {msg1}")
                             was_vtype_logged = True
                         last_tp.value_type = object
+
+                else:   # one is an array, the other is not
+                    if not was_mixed_logged:
+                        args0 = get_arg_expr(last_args)
+                        args1 = get_arg_expr(tr.arg_vals)
+                        msg0 = f"{'array of ' if last_tp.is_array else ''}{last_tp.value_type.__name__} for {args0}"
+                        msg1 = f"{'array of ' if tp.is_array else ''}{tp.value_type.__name__} for {args1}"
+                        _logger.info(f"varying array and non-array types returned from {self.fqname}:{msg0} and {msg1}")
+                        was_mixed_logged = True
+
+                    last_tp = ReturnTypeInfo(object)
 
             else:
                 last_tp = tp
