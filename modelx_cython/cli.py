@@ -20,6 +20,7 @@ import shutil
 import runpy
 import ast
 import argparse
+import dataclasses
 import logging
 import subprocess
 from typing import IO, TYPE_CHECKING, Sequence, Optional, Tuple
@@ -30,6 +31,7 @@ from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.builder import ModuleInfo
 from modelx_cython.parser import ModuleVisitor
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
+from modelx_cython.usage import analyze_usage, apply_verdicts
 
 
 def increment_backups(
@@ -77,6 +79,28 @@ class HandlerError(Exception):
     pass
 
 
+@dataclasses.dataclass
+class _TransUnit:
+    """One module's parsed state between the build and transform phases."""
+    fqname: str
+    source: str
+    visitor: ModuleVisitor
+    module_info: ModuleInfo
+    abs_src_path: pathlib.Path
+    rel_src_path: pathlib.Path
+    abs_pxd_path: pathlib.Path
+    abs_init_path: pathlib.Path
+
+
+def iter_module_files(model_path: pathlib.Path):
+    """Yield (module fqname, path) for every model/space module under
+    model_path. fqnames are rooted at model_path.name."""
+    for name in (MX_MODEL_MOD, MX_SPACE_MOD):
+        for path in sorted(model_path.rglob(name + ".py")):
+            rel = path.relative_to(model_path.parent).with_suffix("")
+            yield ".".join(rel.parts), path
+
+
 def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> int:
 
     orig_path = pathlib.Path(args.model_path).resolve()
@@ -103,6 +127,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
+
+        # Phase 1: parse all sources and build all module infos
+        units = []
         for m in logger.modules:
             subs = m.split(".")
             assert subs.pop(0) == model_path.name
@@ -117,13 +144,32 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             source = abs_src_path.read_text()
             visitor = ModuleVisitor(module=m, source=source)
             module_info = ModuleInfo(m, visitor, logger, spec)
-            trans = ModuleTransformer(source, module_info)
-            pxd = PXDGenerator(module_info)
+            units.append(_TransUnit(
+                m, source, visitor, module_info,
+                abs_src_path, rel_src_path, abs_pxd_path, abs_init_path))
 
-            abs_src_path.write_text(trans.transformed.code)
-            abs_pxd_path.write_text(pxd.code)
-            abs_init_path.write_text("from . cimport _mx_classes")
-            modules.append(rel_src_path)
+        # Phase 2: classify cross-module usage of array-returning cells
+        # so that get_rettype_expr can fall back to object where needed.
+        # Modules whose cells the sample never exercised are not transformed,
+        # but their formulas may still consume traced cells, so they are
+        # parsed for the analysis as well.
+        pairs = [(u.visitor, u.module_info) for u in units]
+        traced = {u.fqname for u in units}
+        for m, src_path in iter_module_files(model_path):
+            if m not in traced:
+                visitor = ModuleVisitor(module=m, source=src_path.read_text())
+                pairs.append((visitor, ModuleInfo(m, visitor, logger, spec)))
+        apply_verdicts(pairs, analyze_usage(pairs))
+
+        # Phase 3: transform and write out
+        for u in units:
+            trans = ModuleTransformer(u.source, u.module_info)
+            pxd = PXDGenerator(u.module_info)
+
+            u.abs_src_path.write_text(trans.transformed.code)
+            u.abs_pxd_path.write_text(pxd.code)
+            u.abs_init_path.write_text("from . cimport _mx_classes")
+            modules.append(u.rel_src_path)
 
         create_setup(model_name, modules=modules, setup_file=setup_file)
 

@@ -30,6 +30,7 @@ class TransSpec:
     CELLS_PARAMS = "cells_params"   # deprecated
     SIZE = "size"   # deprecated
     RET_T = "return_type"
+    RET_MEMORYVIEW = "memoryview"   # RET_T value forcing memoryview emission
     PARAM_T = "param_type"
 
     def __init__(self, data: dict) -> None:
