@@ -12,8 +12,11 @@ import numbers
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
-from typing import Union, Sequence, Mapping, Dict, Tuple
+from typing import Union, Sequence, Mapping, Dict, Optional, Tuple, TYPE_CHECKING
 import logging
+
+if TYPE_CHECKING:
+    from modelx_cython.usage import UsageVerdict
 
 try:
     from types import NoneType
@@ -36,12 +39,19 @@ from modelx_cython.typedefs import str_to_type, normalize_type
 
 _logger = logging.getLogger(__name__)
 
+# Policy for array-returning cells with no call sites inside the model
+# (consumed only by external user scripts, which the usage analysis cannot
+# see). True keeps the const-memoryview return type; False falls back to
+# object.
+MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS: bool = True
+
 
 class CombinedCellsInfo(LexicalCellsInfo):
     parent: 'ClassInfo'
     _rt: RuntimeCellsInfo
     _spec: dict
     _spec_ret_t: str
+    usage: 'Optional[UsageVerdict]' = None  # set by usage.apply_verdicts
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         super().__init__(
@@ -51,11 +61,26 @@ class CombinedCellsInfo(LexicalCellsInfo):
         self._rt = rt_info
         self._spec = spec
         self._spec_ret_t = spec.get(TransSpec.RET_T, "")
+        self._force_memoryview = self._spec_ret_t == TransSpec.RET_MEMORYVIEW
+        if self._force_memoryview:
+            if self.has_typeinfo():
+                if not (self.is_array_returned and self.is_real_value
+                        and self.ret_ndim >= 1):
+                    raise ValueError(
+                        f"invalid value for spec '{TransSpec.RET_T}': "
+                        f"'{TransSpec.RET_MEMORYVIEW}' requires a real-valued "
+                        f"numpy array return, but '{self.fqname}' does not "
+                        "return one")
+            else:
+                _logger.warning(
+                    f"spec '{TransSpec.RET_T}': '{TransSpec.RET_MEMORYVIEW}' "
+                    f"for '{self.fqname}' is ignored because no type "
+                    "information was sampled")
 
     @cached_property
     def norm_type(self) -> type:
         if self.has_typeinfo():
-            if self._spec_ret_t:
+            if self._spec_ret_t and not self._force_memoryview:
                 if self._spec_ret_t in str_to_type:
                     return str_to_type[self._spec_ret_t]
                 else:
@@ -81,6 +106,29 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def has_args(self):
         return bool(self.params)
 
+    @property
+    def ret_ndim(self) -> int:
+        assert self.has_typeinfo()
+        return self._rt.ret_type.ndim
+
+    @property
+    def has_spec_rettype(self) -> bool:
+        return bool(self._spec_ret_t)
+
+    @property
+    def use_memoryview(self) -> bool:
+        # A plain property, not cached: `usage` is assigned after
+        # construction, between the build and transform phases.
+        if self._force_memoryview:
+            return True
+        if self.usage is None:
+            return True     # no analysis info: keep legacy behavior
+        if not self.usage.only_element_access:
+            return False
+        if not self.usage.has_internal_uses:
+            return MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS
+        return True
+
     def get_argtype_expr(self, arg: str, c_style=False) -> str:
         if self.has_typeinfo():
             assert arg in self._rt.arg_types
@@ -93,6 +141,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
             if self.is_real_value and self.is_array_returned:
+                if not self.use_memoryview:
+                    return "object"
                 # const element type so that read-only arrays, such as those
                 # returned by pandas under copy-on-write, can be coerced
                 suffix = "[" + ", ".join(":" * self._rt.ret_type.ndim) + "]"
@@ -210,7 +260,8 @@ class ClassInfo:
         self._add_space_params()
 
     def _init_cells(self):
-        for name, lx_info in self.visitor.cells_info[self.name].items():
+        # .get: model classes and container-only spaces have no cells
+        for name, lx_info in self.visitor.cells_info.get(self.name, {}).items():
             rt_info = self.logger.cells_info.get(lx_info.fqname, None)
             self.cells[name] = CombinedCellsInfo(
                 self,

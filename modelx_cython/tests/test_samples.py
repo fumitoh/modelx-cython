@@ -38,7 +38,13 @@ def test_mx2cy_with_lifelib(sample_dir, target, model):
     elif target == "main":
         from modelx_cython.cli import main
         assert main(argv[1:], sys.stdout, sys.stderr) == 0
-    
+
+    if model == "BasicTerm_S":
+        # the usage classifier detects disc_factors' whole-array consumers
+        # without a spec override
+        pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+        assert "cdef object _v_disc_factors\n" in pxd
+
     assert subprocess.run(
         [sys.executable, str(work_dir / "assert_cy.py")],
         env=env
@@ -206,6 +212,63 @@ def test_various_types(sample_dir, model, sample, assertion):
         capture_output=True,
         text=True
     ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["array_usage", "ArrayUsage"]],
+                         indirect=["sample_dir"])
+def test_array_usage(sample_dir, model):
+    """Memoryview return types are kept only for element-access-only cells"""
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--no-spec"]
+
+    assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
+
+    pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+
+    # element-access-only consumers keep the memoryview
+    assert "cdef const double[:] _v_arr_elem\n" in pxd
+    assert "cdef const double[:, :] _v_arr2d\n" in pxd
+    assert "cdef const double[:] _v_arr_cross_elem\n" in pxd
+    assert "cpdef const double[:] arr_elem(_c_Data self)\n" in pxd
+
+    # whole-array consumers fall back to object
+    assert "cdef object _v_arr_whole\n" in pxd
+    assert "cdef object _v_arr_sliced\n" in pxd
+    assert "cdef object _v_arr_cross_whole\n" in pxd
+    assert "cpdef object arr_whole(_c_Data self)\n" in pxd
+
+    # no model-internal uses: the memoryview is kept (policy)
+    assert "cdef const double[:] _v_arr_external\n" in pxd
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env
+    ).returncode == 0
+
+    # spec return_type "memoryview" overrides the classifier
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--spec", str(work_dir / "spec_force_mv.py"),
+            "--translate-only"]
+
+    assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
+    pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+    assert "cdef const double[:] _v_arr_whole\n" in pxd
+
+    # "memoryview" on a cells not returning a real-valued array is an error
+    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--spec", str(work_dir / "spec_bad_mv.py"),
+            "--translate-only"]
+
+    result = subprocess.run(argv, env=env, cwd=work_dir,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "requires a real-valued numpy array return" in result.stderr
 
 
 @pytest.mark.parametrize("sample_dir, model", [["array_size", "ArraySize"]],
