@@ -1,0 +1,9 @@
+# Requirements for building the documentation with Sphinx, in addition to
+# the package's own dependencies (autodoc imports modelx_cython):
+#
+#   pip install -r doc/requirements.txt
+#   pip install -e .
+#   sphinx-build -b html doc/source doc/build/html
+sphinx>=7
+myst-parser>=2
+sphinx-rtd-theme>=2
