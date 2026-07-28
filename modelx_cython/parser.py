@@ -12,6 +12,21 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
+"""Lexical analysis of exported modelx modules using libcst.
+
+This module parses the source code of the modules that make up an
+exported modelx model and records their lexical (static) structure:
+which classes are space classes (names prefixed ``_c_``), which methods
+of those classes are cells, which names are refs assigned in
+``_mx_assign_refs``, and which child spaces each space creates in its
+``__init__``.
+
+:class:`ModuleVisitor` performs the traversal and stores the results as
+:class:`LexicalCellsInfo` and :class:`LexicalRefInfo` objects, which the
+builder later combines with runtime trace information to produce the
+typing information used by the Cython transformer.
+"""
+
 from abc import ABC, abstractmethod
 from typing import Union, Sequence, Mapping
 
@@ -36,11 +51,27 @@ from modelx_cython.consts import (
 
 
 class LexicalBaseMemberInfo:
+    """Base class for lexical information on a space class member.
+
+    Identifies a member (a cells method or a ref) of a space class by
+    the module, class, and member name found in the source code.
+
+    Attributes
+    ----------
+    module : str
+        Name of the module the member is defined in.
+    cls : str
+        Name of the space class the member belongs to.
+    name : str
+        Name of the member itself.
+    """
+
     module: str
     cls: str
     name: str
 
     def __init__(self, module, cls, name):
+        """Store the module, class, and member names."""
         self.module: str = module
         self.cls: str = cls
         self.name: str = name
@@ -48,48 +79,103 @@ class LexicalBaseMemberInfo:
     @cached_property
     @abstractmethod
     def fqname(self):
+        """Fully-qualified name of the member.
+
+        Abstract cached property; subclasses build the dotted name from
+        ``module``, ``cls``, and ``name``.
+        """
         pass
 
 
 class LexicalCellsInfo(LexicalBaseMemberInfo):
+    """Lexical information on a cells method of a space class.
+
+    Attributes
+    ----------
+    params : Sequence[str]
+        Parameter names as collected from the formula signature
+        (positional parameters, excluding ``self``).
+    """
 
     params: Sequence[str]
     params_with_defaults: Sequence[str]
 
     def __init__(self, module, cls, name, params, params_with_defaults=()) -> None:
+        """Store identifying names and the parameter name lists."""
         super().__init__(module, cls, name)
         self.params: Sequence[str] = params
         self.params_with_defaults: Sequence[str] = params_with_defaults
 
     def is_special(self):
+        """Return whether the cells name is a special (dunder) name.
+
+        Returns
+        -------
+        bool
+            ``True`` if ``name`` both starts and ends with ``"__"``
+            (e.g. ``__call__``), ``False`` otherwise.
+        """
         return self.name[:2] == self.name[-2:] == "__"
 
     @cached_property
     def fqname(self):
+        """Fully-qualified name of the cells' formula method.
+
+        Returns ``"<module>.<cls>._f_<name>"``, where the ``_f_``
+        (:data:`FORMULA_PREF`) prefix is omitted for special (dunder)
+        names such as ``__call__``.
+        """
         pref = "" if self.is_special() else FORMULA_PREF
         result = self.module + "." + self.cls + "." + pref + self.name
         return result
 
 
 class LexicalRefInfo(LexicalBaseMemberInfo):
+    """Lexical information on a ref assigned in ``_mx_assign_refs``."""
 
     @cached_property
     def fqname(self):
+        """Fully-qualified name: ``"<module>.<cls>.<name>"``."""
         return self.module + "." + self.cls + "." + self.name
 
 
 class ParentScopeAddin:
+    """Mixin adding parent-node and scope queries to a libcst visitor.
+
+    Relies on the host visitor's ``get_metadata`` with
+    :class:`ParentNodeProvider` and :class:`ScopeProvider` resolved.
+    """
 
     def get_parent(self, node, level=0):
+        """Return the ancestor of ``node`` that is ``level`` parents up.
+
+        ``level=0`` returns ``node`` itself; each increment walks one
+        step up via :class:`ParentNodeProvider`.
+        """
         while level:
             node = self.get_metadata(ParentNodeProvider, node)
             level -= 1
         return node
 
     def _get_scope(self, node, level=0):
+        """Return the scope of the ancestor ``level`` parents above
+        ``node``."""
         return self.get_metadata(ScopeProvider, self.get_parent(node, level=level))
 
     def is_space_scope(self, node, level=0):
+        """Return whether the node's scope is a space class body.
+
+        Checks the scope of the ancestor ``level`` parents above
+        ``node``.
+
+        Returns
+        -------
+        bool
+            ``True`` if that scope is a :class:`ClassScope` whose name
+            starts with ``_c_`` (:data:`SPACE_PREF`) and whose parent
+            scope is the module's :class:`GlobalScope`, i.e. the body
+            of a top-level space class.
+        """
         scope = self._get_scope(node, level)
         return bool(
             isinstance(scope, ClassScope)
@@ -99,9 +185,42 @@ class ParentScopeAddin:
 
 
 class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
+    """Collect the lexical structure of one exported modelx module.
+
+    Parses ``source`` with libcst and visits it immediately on
+    construction, so all attributes below are fully populated when
+    ``__init__`` returns.  Cells, refs, and child spaces are collected
+    only from top-level space classes (names prefixed ``_c_``), while
+    the ``classes`` list records every ``_c_``-prefixed class found
+    anywhere in the module.
+
+    Attributes
+    ----------
+    module : str
+        Name of the module being parsed.
+    source : str
+        Source code of the module.
+    cells_info : dict
+        Maps each space class name to a dict mapping cells names to
+        :class:`LexicalCellsInfo` objects.
+    ref_info : dict
+        Maps each space class name to a dict mapping ref names to
+        :class:`LexicalRefInfo` objects.
+    classes : list of str
+        Names of all classes prefixed ``_c_`` found in the module.
+    spaces : dict
+        Maps each space class name to the list of child space names
+        assigned to ``self`` in its ``__init__``.
+    cimports : list
+        Always left empty by this visitor.
+    wrapper : cst.metadata.MetadataWrapper
+        Metadata wrapper around the parsed module.
+    """
+
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(self, module, source):
+        """Parse ``source`` and visit it to collect member info."""
         super().__init__()
         self.module = module
         self.source = source
@@ -150,6 +269,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
 
     @m.leave(m.ClassDef())
     def collect_classes(self, original_node):
+        """Record every class whose name starts with ``_c_`` in
+        ``self.classes``."""
         name = original_node.name.value
         if name[:len(SPACE_PREF)] == SPACE_PREF:
             self.classes.append(name)
@@ -158,6 +279,9 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     @m.call_if_inside(m.FunctionDef(name=cst.Name("__init__")))
     @m.leave(m.SimpleStatementLine())
     def collect_space_info(self, original_node):
+        """Record child spaces from ``self.<name>`` assignments in a
+        space class's ``__init__``, for names without a leading
+        underscore, into ``self.spaces``."""
         if self.is_space_scope(original_node, level=2):
             # SimpleStatement in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
             node = original_node
@@ -182,6 +306,9 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     @m.call_if_inside(m.FunctionDef(name=cst.Name(MX_ASSIGN_REFS)))
     @m.leave(m.SimpleStatementLine())
     def collect_refs_info(self, original_node):
+        """Record a :class:`LexicalRefInfo` in ``self.ref_info`` for
+        each attribute assignment in a space class's
+        ``_mx_assign_refs`` method; non-assignments are ignored."""
 
         if self.is_space_scope(original_node, level=2):
             # SimpleStatement in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
@@ -209,6 +336,10 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     @m.call_if_inside(m.ClassDef())
     @m.visit(m.FunctionDef())
     def collect_methods(self, original_node):
+        """Record a :class:`LexicalCellsInfo` in ``self.cells_info``
+        for each cells method of a space class, skipping ``_f_`` and
+        ``_mx_`` prefixed methods and any method whose name starts
+        with ``__`` other than ``__call__``."""
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(

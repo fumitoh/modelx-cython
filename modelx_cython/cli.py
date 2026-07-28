@@ -12,6 +12,21 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
+"""Command-line interface for mx2cy.
+
+This module implements the ``mx2cy`` command, which translates an
+exported modelx model (a pure-Python package created by modelx's
+``Model.export``) into a Cython package and compiles it.
+
+Unless ``--compile-only`` is given, :func:`main_handler` copies the
+model directory to ``<name>_cy``, runs the user's sample script under
+tracing to collect runtime type information, rewrites each traced model
+module with Cython pure-Python-mode annotations, generates matching
+``.pxd`` files, and writes a ``setup.py``.  Unless ``--translate-only`` is
+given, it then runs ``setup.py build_ext --inplace`` to build the
+extension modules in place.
+"""
+
 import sys
 import os
 import textwrap
@@ -39,6 +54,30 @@ _logger = logging.getLogger(__name__)
 def increment_backups(
         base_path: pathlib.Path,
         max_backups=1, nth=0):
+    """Rotate backup copies of ``base_path``.
+
+    If ``base_path`` exists, rename it to ``<base_path>_BAK1``, after
+    first shifting any existing ``<base_path>_BAK<n>`` copy to
+    ``_BAK<n+1>`` by calling itself recursively with ``nth + 1``.  The
+    oldest copy, ``<base_path>_BAK<max_backups>``, is deleted
+    (recursively if it is a directory) instead of being renamed
+    further.
+
+    Parameters
+    ----------
+    base_path : pathlib.Path
+        Path whose backup copies are rotated.
+    max_backups : int, optional
+        Number of ``_BAK`` copies to keep (default 1).
+    nth : int, optional
+        Backup generation currently being shifted; used internally by
+        the recursion.  Callers should leave this at 0.
+
+    Raises
+    ------
+    ValueError
+        If a path to be removed is neither a file nor a directory.
+    """
 
     postfix = "_BAK" + str(nth) if nth else ""
     backup_path = pathlib.Path(str(base_path) + postfix)
@@ -57,6 +96,31 @@ def increment_backups(
 
 
 def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None) -> MxCallTraceLogger:
+    """Run the user's sample script while tracing calls into the model.
+
+    Temporarily prepends the model's parent directory to ``sys.path``,
+    then executes ``sample_path`` with :func:`runpy.run_path` (as
+    ``__main__``) under :func:`~modelx_cython.tracer.trace_calls`, so
+    that calls into modules of the ``model_path`` package are recorded
+    by an :class:`~modelx_cython.tracer.MxCallTraceLogger`.
+
+    Parameters
+    ----------
+    model_path : pathlib.Path
+        Path to the exported model package to trace.
+    sample_path : str
+        Path to the sample script to execute.
+    new_model_name : str, optional
+        If given, the model (package) name recorded in the collected
+        trace information is replaced with this name (e.g.
+        ``<name>_cy``).
+
+    Returns
+    -------
+    MxCallTraceLogger
+        Logger holding the per-cells type information collected during
+        the run.
+    """
 
     module: str = model_path.name
     try:
@@ -78,12 +142,35 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
 
 
 class HandlerError(Exception):
+    """Error type reserved for failures in the command-line handlers."""
     pass
 
 
 @dataclasses.dataclass
 class _TransUnit:
-    """One module's parsed state between the build and transform phases."""
+    """One module's parsed state between the build and transform phases.
+
+    Attributes
+    ----------
+    fqname : str
+        Fully qualified module name rooted at the model package name.
+    source : str
+        Original source code of the module.
+    visitor : ModuleVisitor
+        Lexical information parsed from ``source``.
+    module_info : ModuleInfo
+        Combined lexical, runtime and spec information for the module.
+    abs_src_path : pathlib.Path
+        Absolute path of the module's ``.py`` file.
+    rel_src_path : pathlib.Path
+        Path of the ``.py`` file relative to the working directory,
+        as listed in the generated ``setup.py``.
+    abs_pxd_path : pathlib.Path
+        Absolute path of the ``.pxd`` file to generate.
+    abs_init_path : pathlib.Path
+        Absolute path of the ``__init__.pxd`` file to generate in the
+        module's package directory.
+    """
     fqname: str
     source: str
     visitor: ModuleVisitor
@@ -96,7 +183,20 @@ class _TransUnit:
 
 def iter_module_files(model_path: pathlib.Path):
     """Yield (module fqname, path) for every model/space module under
-    model_path. fqnames are rooted at model_path.name."""
+    model_path. fqnames are rooted at model_path.name.
+
+    Parameters
+    ----------
+    model_path : pathlib.Path
+        Root directory of the model package to scan.
+
+    Yields
+    ------
+    tuple of (str, pathlib.Path)
+        Dotted module name and file path of each ``_mx_model.py`` and
+        ``_mx_classes.py`` file, in sorted path order for each of the
+        two module kinds.
+    """
     for name in (MX_MODEL_MOD, MX_SPACE_MOD):
         for path in sorted(model_path.rglob(name + ".py")):
             rel = path.relative_to(model_path.parent).with_suffix("")
@@ -104,6 +204,56 @@ def iter_module_files(model_path: pathlib.Path):
 
 
 def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> int:
+    """Run the translate and compile pipeline for a parsed command line.
+
+    Resolves ``args.model_path`` and derives the output package
+    directory ``<name>_cy`` next to it, along with the ``setup.py``
+    location (``args.setup`` if given, otherwise ``setup.py`` in the
+    same parent directory).
+
+    Unless ``args.compile_only`` is set, performs the translation:
+    rotates backups of the output directory, copies the model there,
+    copies the bundled ``_mx_sys.pxd`` into it, runs the sample script
+    under tracing via :func:`run_sample`, and reads the spec file with
+    :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
+    missing spec file re-raises :class:`FileNotFoundError` with a hint
+    to use ``--no-spec``).  Translation proper then runs in three
+    phases: (1) parse each traced module and build its
+    :class:`~modelx_cython.builder.ModuleInfo`; (2) statically analyze
+    how array-returning cells are consumed across all model modules --
+    including untraced ones -- and apply the verdicts so unsafe
+    memoryview return types fall back to ``object``; (3) rewrite each
+    traced module with
+    :class:`~modelx_cython.transformer.ModuleTransformer`, write its
+    ``.pxd`` and ``__init__.pxd`` files, and finally write the
+    generated ``setup.py`` via :func:`create_setup`.
+
+    Unless ``args.translate_only`` is set, compiles the result with
+    :func:`compile_main`.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        Parsed command-line arguments (see :func:`main`).
+    stdout : IO[str]
+        Output stream; accepted for interface compatibility but not
+        used.
+    stderr : IO[str]
+        Error stream; accepted for interface compatibility but not
+        used.
+
+    Returns
+    -------
+    int
+        0 when only translating, otherwise the exit code of the
+        compilation subprocess.
+
+    Raises
+    ------
+    FileNotFoundError
+        If translation is performed (``--compile-only`` not set), the
+        spec file does not exist, and ``--no-spec`` was not given.
+    """
 
     orig_path = pathlib.Path(args.model_path).resolve()
     work_dir = orig_path.parent
@@ -209,6 +359,28 @@ LOG_LEVELS = {
 
 # Custom type function for argparse
 def parse_log_level(value):
+    """Convert a command-line value to a :mod:`logging` level.
+
+    Used as the argparse ``type`` for ``--log-level``.  Accepts either
+    a standard numeric level (e.g. ``"10"``) or a case-insensitive
+    level name (e.g. ``"debug"``).
+
+    Parameters
+    ----------
+    value : str
+        Command-line argument to interpret.
+
+    Returns
+    -------
+    int
+        The corresponding logging level.
+
+    Raises
+    ------
+    argparse.ArgumentTypeError
+        If ``value`` is neither a recognized numeric level nor a
+        recognized level name.
+    """
     try:
         # Try interpreting as an integer
         level = int(value)
@@ -224,6 +396,24 @@ def parse_log_level(value):
 
 
 def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> int:
+    """Compile the translated model with the generated ``setup.py``.
+
+    Runs ``sys.executable <setup_file> build_ext --inplace`` in a
+    subprocess with ``work_dir`` as the working directory and with
+    ``work_dir`` prepended to the subprocess's ``PYTHONPATH``.
+
+    Parameters
+    ----------
+    work_dir : pathlib.Path
+        Directory containing the translated model package.
+    setup_file : pathlib.Path
+        Path to the ``setup.py`` script to run.
+
+    Returns
+    -------
+    int
+        Exit code of the subprocess.
+    """
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -233,6 +423,29 @@ def compile_main(work_dir: pathlib.Path, setup_file: pathlib.Path) -> int:
 
 
 def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
+    """Parse command-line arguments and run :func:`main_handler`.
+
+    Defines the ``mx2cy`` argument parser: positional ``model_path``,
+    ``--sample``, mutually exclusive ``--spec``/``--no-spec``,
+    ``--setup``, mutually exclusive
+    ``--translate-only``/``--compile-only``, and ``--log-level``.
+    Configures the root logger with :func:`logging.basicConfig` at the
+    requested level before delegating to :func:`main_handler`.
+
+    Parameters
+    ----------
+    argv : Sequence[str]
+        Command-line arguments, excluding the program name.
+    stdout : IO[str]
+        Output stream passed through to :func:`main_handler`.
+    stderr : IO[str]
+        Error stream passed through to :func:`main_handler`.
+
+    Returns
+    -------
+    int
+        Exit code returned by :func:`main_handler`.
+    """
 
     parser = argparse.ArgumentParser(
         description="Translate an exported modelx model into Cython and compile it.",
@@ -311,6 +524,25 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
 
 
 def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path):
+    """Write a ``setup.py`` that cythonizes the translated modules.
+
+    The generated script calls :func:`setuptools.setup` with
+    ``name=model_name`` and ``ext_modules`` produced by
+    ``cythonize(..., annotate=True)`` over the given module paths.
+    Any existing file at ``setup_file`` is overwritten.
+
+    Parameters
+    ----------
+    model_name : str
+        Package name of the translated model (e.g. ``<name>_cy``).
+    modules : Sequence[pathlib.PurePath]
+        Paths of the ``.py`` files to compile, relative to the
+        directory where the script is run.  Despite the ``str``
+        annotation, path objects are required, as each is written
+        into the script via its ``as_posix`` method.
+    setup_file : pathlib.Path
+        Path of the ``setup.py`` file to write.
+    """
 
     modules_str = textwrap.indent(",\n".join(
         ['"' + s.as_posix() + '"' for s in modules]

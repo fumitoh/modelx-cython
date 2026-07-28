@@ -6,6 +6,20 @@
 #
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
+
+"""Vendored call-tracing machinery adapted from MonkeyType.
+
+This module is a modified copy of ``monkeytype/tracing.py`` from
+MonkeyType v23.3.0, used under its BSD-style license (see the header
+comments above and ``LICENSES/LICENSE_MONKEYTYPE.txt``).  The main
+modification is that :class:`CallTrace` is redefined to carry
+observed *values* (arguments, locals, return and yield values)
+instead of the types MonkeyType recorded; the original type-based
+class is kept as :class:`xCallTrace`.  :mod:`modelx_cython.tracer`
+builds its own tracer on top of :class:`CallTracer`,
+:class:`CallTraceLogger`, and the helpers defined here.
+"""
+
 import inspect
 import logging
 import random
@@ -52,6 +66,7 @@ class CallTrace:    # Updated CallTrace
 
     @property
     def funcname(self) -> str:
+        """Fully qualified dotted name of the traced function."""
         return get_func_fqname(self.func)
 
 
@@ -80,11 +95,15 @@ class xCallTrace:   # Original CallTrace
         self.yield_type = yield_type
 
     def __eq__(self, other: object) -> bool:
+        """Compare all attributes with another instance of the same
+        class; return NotImplemented for other types."""
         if isinstance(other, self.__class__):
             return self.__dict__ == other.__dict__
         return NotImplemented
 
     def __repr__(self) -> str:
+        """Return a CallTrace(...) representation showing function,
+        argument types, return type, and yield type."""
         return "CallTrace(%s, %s, %s, %s)" % (
             self.func,
             self.arg_types,
@@ -93,6 +112,8 @@ class xCallTrace:   # Original CallTrace
         )
 
     def __hash__(self) -> int:
+        """Hash on the function, argument types, return type, and
+        yield type."""
         return hash(
             (
                 self.func,
@@ -103,6 +124,8 @@ class xCallTrace:   # Original CallTrace
         )
 
     def add_yield_type(self, typ: type) -> None:
+        """Record a yielded value's type, widening ``yield_type`` to
+        a Union when multiple distinct types are observed."""
         if self.yield_type is None:
             self.yield_type = typ
         else:
@@ -110,6 +133,7 @@ class xCallTrace:   # Original CallTrace
 
     @property
     def funcname(self) -> str:
+        """Fully qualified dotted name of the traced function."""
         return get_func_fqname(self.func)
 
 
@@ -155,6 +179,8 @@ def get_func_in_mro(obj: Any, code: CodeType) -> Optional[Callable[..., Any]]:
 def _has_code(
     func: Optional[Callable[..., Any]], code: CodeType
 ) -> Optional[Callable[..., Any]]:
+    """Return *func*, or a function it wraps via ``__wrapped__``,
+    whose ``__code__`` is *code*; None if there is no match."""
     while func is not None:
         func_code = getattr(func, "__code__", None)
         if func_code is code:
@@ -224,6 +250,22 @@ class CallTracer:
         code_filter: Optional[CodeFilter] = None,
         sample_rate: Optional[int] = None,
     ) -> None:
+        """Initialize the tracer.
+
+        Parameters
+        ----------
+        logger : CallTraceLogger
+            Receives each completed trace via its ``log`` method.
+        max_typed_dict_size : int
+            Passed to ``monkeytype.typing.get_type`` to limit typed
+            dict inference.
+        code_filter : CodeFilter, optional
+            Predicate deciding whether calls of a given code object
+            are traced; None traces every call.
+        sample_rate : int, optional
+            If given, only about one in *sample_rate* calls is
+            traced.
+        """
         self.logger = logger
         self.traces: Dict[FrameType, CallTrace] = {}
         self.sample_rate = sample_rate
@@ -232,12 +274,23 @@ class CallTracer:
         self.max_typed_dict_size = max_typed_dict_size
 
     def _get_func(self, frame: FrameType) -> Optional[Callable[..., Any]]:
+        """Resolve the function for *frame*, caching the result per
+        code object."""
         code = frame.f_code
         if code not in self.cache:
             self.cache[code] = get_func(frame)
         return self.cache[code]
 
     def handle_call(self, frame: FrameType) -> None:
+        """Start a trace for a ``'call'`` event on *frame*.
+
+        Skips sampled-out calls, frames whose function cannot be
+        resolved, and resumed generator frames already being traced.
+        Otherwise records a new :class:`CallTrace` for the frame,
+        storing the ``monkeytype.typing.get_type`` of each argument
+        present in the frame locals (kept in the trace's second
+        field, ``arg_vals``).
+        """
         if self.sample_rate and random.randrange(self.sample_rate) != 0:
             return
         func = self._get_func(frame)
@@ -259,6 +312,22 @@ class CallTracer:
         self.traces[frame] = CallTrace(func, arg_types)
 
     def handle_return(self, frame: FrameType, arg: Any) -> None:
+        """Complete or update the trace for a ``'return'`` event.
+
+        *arg* is the returned or yielded value, or None if the frame
+        is unwinding due to an unhandled exception.  The last
+        executed opcode distinguishes the cases: on a yield, the code
+        calls ``trace.add_yield_type`` — a leftover from the original
+        type-based ``CallTrace`` that the redefined class does not
+        define, so the call raises :exc:`AttributeError` (swallowed
+        and logged by :meth:`__call__`) and no yield type is
+        recorded; on a true return, the type is stored as the trace's
+        ``return_type`` attribute.  In every non-yield case
+        (including exceptional unwinding, which leaves
+        ``return_type`` unset) the trace is removed from the pending
+        table and passed to the logger.  Frames with no pending
+        trace are ignored.
+        """
         # In the case of a 'return' event, arg contains the return value, or
         # None, if the block returned because of an unhandled exception. We
         # need to distinguish the exceptional case (not a valid return type)
@@ -279,6 +348,16 @@ class CallTracer:
             self.logger.log(trace)
 
     def __call__(self, frame: FrameType, event: str, arg: Any) -> "CallTracer":
+        """Profile hook dispatching ``'call'`` and ``'return'``
+        events.
+
+        Installed via ``sys.setprofile``.  Ignores unsupported
+        events, frames running code named ``trace_types``, and
+        frames rejected by the code filter; otherwise delegates to
+        :meth:`handle_call` or :meth:`handle_return`, logging (but
+        swallowing) any exception raised while collecting the trace.
+        Returns the tracer itself.
+        """
         code = frame.f_code
         if (
             event not in SUPPORTED_EVENTS
