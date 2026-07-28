@@ -12,6 +12,13 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
+"""Entry point for ``python -m modelx_cython``.
+
+Running the package as a script invokes
+:func:`modelx_cython.cli.entry_point_main`, the same function behind
+the ``mx2cy`` console command.
+"""
+
 from modelx_cython.cli import entry_point_main
 
 entry_point_main()

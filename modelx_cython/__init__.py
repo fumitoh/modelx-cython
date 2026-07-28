@@ -13,7 +13,23 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
+"""modelx-cython: Cythonize exported modelx models.
 
+modelx-cython translates a modelx model exported as a pure-Python
+package with modelx's ``Model.export()`` into a Cython package and
+compiles it into C extension modules for faster execution.  The
+translation is performed by the ``mx2cy`` command-line tool (see
+:mod:`modelx_cython.cli`), which can also be run as
+``python -m modelx_cython``.
+
+Attributes
+----------
+version_info : tuple of int
+    The version number as a tuple of integers.
+__version__ : str
+    The version number as a dotted string, derived from
+    ``version_info``.
+"""
 
 version_info = (0, 0, 8)
 __version__ = ".".join([str(x) for x in version_info])

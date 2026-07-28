@@ -56,7 +56,26 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class UsageVerdict:
-    """Aggregated classification of one candidate cells' call sites."""
+    """Aggregated classification of one candidate cells' call sites.
+
+    Attributes
+    ----------
+    fqname : str
+        Fully-qualified name of the candidate cells.
+    ndim : int
+        Number of dimensions of the cells' sampled return array.
+    only_element_access : bool
+        ``True`` while every classified use of the returned value is
+        scalar element access (or a discarded expression); set to
+        ``False`` when the first unsafe site is recorded.
+    has_internal_uses : bool
+        Whether any model-internal call site resolved to this cells.
+    unsafe_sites : list of str
+        ``"<module>:<line> <reason>"`` entries, one per call site
+        classified unsafe — either a use that failed the
+        element-access check, or an unresolvable call that poisoned
+        this cells because it shares the cells' name.
+    """
 
     fqname: str
     ndim: int
@@ -103,6 +122,31 @@ class CellsResolver:
     def resolve_chain(
         self, cls_fqname: str, chain: Sequence[str]
     ) -> Tuple[str, str]:
+        """Resolve a self-rooted attribute chain to a cells fqname.
+
+        Starting at ``cls_fqname``, each intermediate name in ``chain``
+        is followed through child spaces and space-valued refs whose
+        classes are among the parsed modules; the last name is then
+        looked up among the cells of the class reached.
+
+        Parameters
+        ----------
+        cls_fqname : str
+            Fqname of the mx_class in which the call site occurs.
+        chain : sequence of str
+            Attribute names after ``self``, e.g. ``["bar", "qux"]`` for
+            ``self.bar.qux(...)``.
+
+        Returns
+        -------
+        tuple of (str, str)
+            ``(RESOLVED, <cells fqname>)`` on success;
+            ``(NOT_CELLS, "")`` when the chain passes through a
+            non-space ref or ends on a non-cells attribute;
+            ``(UNKNOWN, <called name>)`` when a link cannot be resolved
+            (unparsed module or untracked attribute such as
+            ``_parent``).
+        """
         cur = cls_fqname
         for attr in chain[:-1]:
             child = self._spaces.get(cur, {}).get(attr, "")
@@ -144,6 +188,8 @@ class CellsResolver:
         return chain[-1] in self._scalar_refs.get(cur, set())
 
     def cells_with_name(self, name: str) -> Sequence[str]:
+        """Fqnames of every cells in the model whose public name is
+        ``name``; empty when no cells has that name."""
         return self._name_index.get(name, ())
 
 
@@ -211,9 +257,15 @@ class UsageClassifier:
     def classify_module(
         self, module_fqname: str, wrapper: cst.metadata.MetadataWrapper
     ) -> None:
+        """Classify every call site in one module.
+
+        Runs a :class:`UsageVisitor` over the module's CST; verdicts
+        accumulate in ``self.verdicts`` across successive calls.
+        """
         wrapper.visit(UsageVisitor(module_fqname, self))
 
     def result(self) -> Dict[str, UsageVerdict]:
+        """The accumulated verdicts, keyed by candidate cells fqname."""
         return self.verdicts
 
     # Called by UsageVisitor
@@ -221,6 +273,14 @@ class UsageClassifier:
     def handle_call(
         self, visitor: "UsageVisitor", cls_fqname: str, node: cst.Call
     ) -> None:
+        """Classify one call site found in the class ``cls_fqname``.
+
+        Non-attribute callees are ignored. Attribute chains not rooted
+        at self, and self-rooted chains that cannot be resolved, poison
+        every candidate whose name matches the called name. Chains that
+        resolve to a candidate cells have their use classified and, if
+        not proven to be element access, marked unsafe.
+        """
         chain = _extract_self_chain(node.func)
         if chain is None:
             return
@@ -244,6 +304,8 @@ class UsageClassifier:
     def _poison(
         self, visitor: "UsageVisitor", node: cst.Call, name: str, reason: str
     ) -> None:
+        """Mark every candidate cells named ``name`` unsafe with
+        ``reason``."""
         for fqname in self._resolver.cells_with_name(name):
             verdict = self.verdicts.get(fqname)
             if verdict is not None:
@@ -256,6 +318,8 @@ class UsageClassifier:
         verdict: UsageVerdict,
         reason: str,
     ) -> None:
+        """Clear ``verdict.only_element_access`` and record the site as
+        ``"<module>:<line> <reason>"``."""
         verdict.only_element_access = False
         line = visitor.get_metadata(PositionProvider, node).start.line
         verdict.unsafe_sites.append(f"{visitor.module}:{line} {reason}")
@@ -347,6 +411,9 @@ class _IndexExprScanner(cst.CSTVisitor):
         self.unsafe = False
 
     def visit_Call(self, node: cst.Call) -> bool:
+        """Mark the scan unsafe unless the call resolves to a
+        non-array-returning cells; bare-name calls (max, int, ...) are
+        descended into instead of being classified."""
         chain = _extract_self_chain(node.func)
         if chain is None:
             return True     # bare-name call (max, int, ...): scan its args
@@ -364,6 +431,8 @@ class _IndexExprScanner(cst.CSTVisitor):
         return False
 
     def visit_Attribute(self, node: cst.Attribute) -> bool:
+        """Mark the scan unsafe unless the chain is a self-rooted ref
+        sampled as a plain number; the chain is pruned either way."""
         chain = _extract_self_chain(node)
         if not (isinstance(chain, list)
                 and self._clf._resolver.is_scalar_ref(self._cls, chain)):
@@ -372,6 +441,14 @@ class _IndexExprScanner(cst.CSTVisitor):
 
 
 class UsageVisitor(cst.CSTVisitor, ParentScopeAddin):
+    """CST visitor that feeds call sites to a :class:`UsageClassifier`.
+
+    Tracks the lexically enclosing class with a stack; only calls whose
+    innermost enclosing class is a module-level space class (name
+    prefixed with ``_c_``) are passed to
+    :meth:`UsageClassifier.handle_call`.
+    """
+
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider, PositionProvider)
 
     def __init__(self, module: str, classifier: UsageClassifier) -> None:
@@ -381,6 +458,8 @@ class UsageVisitor(cst.CSTVisitor, ParentScopeAddin):
         self._cls_stack: List[str] = []
 
     def visit_ClassDef(self, node: cst.ClassDef) -> bool:
+        """Push the class fqname for module-level space classes, or an
+        empty marker for any other class."""
         name = node.name.value
         if (
             name[: len(SPACE_PREF)] == SPACE_PREF
@@ -392,9 +471,12 @@ class UsageVisitor(cst.CSTVisitor, ParentScopeAddin):
         return True
 
     def leave_ClassDef(self, original_node: cst.ClassDef) -> None:
+        """Pop the entry pushed by ``visit_ClassDef``."""
         self._cls_stack.pop()
 
     def visit_Call(self, node: cst.Call) -> bool:
+        """Hand the call to the classifier when the innermost enclosing
+        class is a space class."""
         if self._cls_stack and self._cls_stack[-1]:
             self._classifier.handle_call(self, self._cls_stack[-1], node)
         return True
@@ -426,6 +508,16 @@ def collect_candidates(module_infos) -> Tuple[Dict[str, int], Set[str]]:
 
 
 def build_resolver(module_infos) -> CellsResolver:
+    """Build a :class:`CellsResolver` over ``{fqname: ModuleInfo}``.
+
+    For each parsed class, collects its cells' public-name-to-fqname
+    mapping, each ref's mx_class fqname (or ``""`` for non-space refs),
+    the refs whose sampled values are plain numbers, and each child
+    space attribute mapped to the fqname of the child's class, derived
+    from the package layout: children of the model class live in
+    ``<pkg>._mx_classes``, children of a space class in
+    ``<pkg>._m_<space>._mx_classes``.
+    """
     cells_by_class: Dict[str, Dict[str, str]] = {}
     refs_by_class: Dict[str, Dict[str, str]] = {}
     spaces_by_class: Dict[str, Dict[str, str]] = {}
@@ -474,6 +566,13 @@ def analyze_usage(units) -> Dict[str, UsageVerdict]:
 
 
 def apply_verdicts(units, verdicts: Mapping[str, UsageVerdict]) -> None:
+    """Attach each verdict to its cells info as the ``usage`` attribute.
+
+    ``units`` are (ModuleVisitor, ModuleInfo) pairs. Cells whose
+    verdict failed the element-access check are logged at INFO level
+    with up to three of their unsafe sites. No-op when ``verdicts`` is
+    empty.
+    """
     if not verdicts:
         return
     for _, info in units:

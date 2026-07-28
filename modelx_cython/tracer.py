@@ -16,6 +16,24 @@
 # a Python library for generating static type annotations from runtime types.
 # Refer to the original license and copyright included with this library.
 
+"""Runtime type tracing for exported modelx models.
+
+Run the user's sample script under a :func:`sys.setprofile` profiler
+and record the concrete argument and return values of every cells call
+so that later stages can annotate the generated Cython modules with
+static types.  The machinery is built on vendored MonkeyType code in
+:mod:`modelx_cython.monkeytype_tracing`.
+
+The entry point is :func:`trace_calls`, which installs an
+:class:`MxCallTracer`; its caller (:func:`modelx_cython.cli.run_sample`)
+restricts the tracer with an :class:`MxCodeFilter` to formula methods
+(``_f_*``), ``_mx_assign_refs`` and ``__call__`` defined in
+``_mx_model.py`` / ``_mx_classes.py`` modules.  Collected traces are
+accumulated by :class:`MxCallTraceLogger`, whose :meth:`flush` distills
+them into :class:`RuntimeCellsInfo`, :class:`RuntimeRefInfo` and
+:class:`RuntimeParamInfo` objects consumed by
+:mod:`modelx_cython.builder`.
+"""
 
 import sys
 import pathlib
@@ -65,12 +83,60 @@ _logger = logging.getLogger(__name__)
 
 @dataclass
 class ReturnTypeInfo:
+    """Return type observed for a traced cells method.
+
+    Attributes
+    ----------
+    value_type : type
+        Type of the returned value, or the element (dtype) type when
+        ``is_array`` is ``True``.  May be widened to
+        :class:`numbers.Integral`, :class:`numbers.Real` or ``object``
+        when traces disagree.
+    is_array : bool
+        ``True`` if the returned value is a :class:`numpy.ndarray`.
+    ndim : int
+        Number of array dimensions; ``0`` for non-array values.
+    """
     value_type: type
     is_array: bool = False
     ndim: int = 0
 
 
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
+    """Aggregate runtime type information for one cells method.
+
+    Built from all :class:`CallTrace` records collected for a single
+    traced method (normally a cells formula method, ``_f_*``).  Argument types are merged across traces:
+    a single observed type is kept as-is; multiple integral types widen
+    to :class:`numbers.Integral`; multiple ``str`` subclasses collapse
+    to ``str``; any other mixture falls back to ``object`` (logging a
+    message when integral and non-integral values are mixed).  For
+    integral arguments, the largest observed value is recorded in
+    ``max_args``.
+
+    Return types are merged pairwise across traces: equal types are
+    kept; arrays of equal ``ndim`` have their element types widened to
+    :class:`numbers.Integral`, :class:`numbers.Real` or ``object``;
+    arrays of differing ``ndim``, or a mixture of array and non-array
+    returns, collapse to a plain ``object`` return type.  Each kind of
+    fallback is logged once, with the arguments of the conflicting
+    calls.
+
+    Attributes
+    ----------
+    fqname : str
+        Fully qualified dotted name of the traced method.
+    name : str
+        Bare method name (e.g. ``_f_foo``).
+    module : str
+        Dotted name of the module defining the method.
+    arg_types : dict of str to type
+        Merged argument types, excluding ``self``.
+    max_args : dict of str to int
+        Largest value observed for each integral argument.
+    ret_type : ReturnTypeInfo
+        Merged return type information.
+    """
     name: str
     module: str
     arg_types: Dict[str, type]  # without self
@@ -78,6 +144,14 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     ret_type: ReturnTypeInfo
 
     def __init__(self, traces: Sequence[CallTrace]) -> None:
+        """Build merged type information from a method's traces.
+
+        Parameters
+        ----------
+        traces : sequence of CallTrace
+            Non-empty traces of a single cells method; identity fields
+            are taken from the first trace.
+        """
         self.fqname = traces[0].funcname
         self.name = traces[0].func.__name__
         self.module = traces[0].func.__module__
@@ -87,9 +161,18 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         self.ret_type = self._init_ret_type(traces)
 
     def has_args(self):
+        """Return whether the cells method takes arguments.
+
+        Returns
+        -------
+        bool
+            ``True`` when at least one non-``self`` argument type was
+            recorded.
+        """
         return bool(len(self.arg_types))
 
     def _init_arg_types(self, traces):
+        """Merge observed argument types into arg_types and max_args."""
         arg_type_val: Dict[str, dict[type, Any]] = {}
 
         for trace in traces:
@@ -129,6 +212,9 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
                 self.arg_types[arg] = object
 
     def _init_ret_type(self, traces):
+        """Merge observed return types into one ReturnTypeInfo,
+        widening or falling back to ``object`` as described in the
+        class docstring."""
         last_tp = None
         last_args = None
         has_last = False
@@ -218,13 +304,41 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
 
 
 class RuntimeValueInfo:
+    """Runtime type information for a single traced value.
+
+    Attributes
+    ----------
+    type_ : type
+        Concrete type of the value.
+    mx_class : str
+        Fully qualified name of the value's class when it is defined
+        inside the traced model package (i.e. a modelx object),
+        otherwise an empty string.
+    """
 
     def __init__(self, value, mx_class=''):
+        """Record the type of ``value`` and an optional class name."""
         self.type_ = type(value)
         self.mx_class = mx_class
 
     @classmethod
     def init_mxobj(cls, value, module):
+        """Create an instance, detecting model-defined classes.
+
+        Parameters
+        ----------
+        value : object
+            The traced value.
+        module : str
+            Name of the model's top-level package.
+
+        Returns
+        -------
+        RuntimeValueInfo
+            With ``mx_class`` set to the value's fully qualified class
+            name if the class's module name starts with ``module``,
+            otherwise with ``mx_class`` left empty.
+        """
         if (value.__class__.__module__)[:len(module)] == module:
             return cls(value, mx_class=value.__class__.__module__ + "." + value.__class__.__qualname__)
         else:
@@ -233,10 +347,12 @@ class RuntimeValueInfo:
 
 
 class RuntimeRefInfo(RuntimeValueInfo):
+    """Runtime type information for a ref observed during tracing."""
     pass
 
 
 class RuntimeParamInfo(RuntimeValueInfo):
+    """Runtime type information for an itemspace parameter value."""
     pass
 
 
@@ -244,13 +360,33 @@ class RuntimeParamInfo(RuntimeValueInfo):
 
 
 def replace_first_name(dotted_name: str, name: str):
+    """Replace the first component of a dotted name.
+
+    Parameters
+    ----------
+    dotted_name : str
+        A dotted name such as ``"model.space.cells"``.
+    name : str
+        Replacement for the first component.
+
+    Returns
+    -------
+    str
+        ``dotted_name`` with its first component replaced by ``name``.
+    """
     names = dotted_name.split(".")
     names[0] = name
     return ".".join(names)
 
 
 class MxCallTracer(CallTracer):
-    """Add return_value to CallTrace"""
+    """Add return_value to CallTrace
+
+    A :class:`CallTracer` subclass that records the concrete argument
+    and return *values* (not just their types) into :class:`CallTrace`
+    records, and that only traces functions whose top-level module name
+    equals ``module``.
+    """
 
     def __init__(
         self,
@@ -260,10 +396,34 @@ class MxCallTracer(CallTracer):
         code_filter: Optional[CodeFilter] = None,
         sample_rate: Optional[int] = None,
     ) -> None:
+        """Initialize the tracer.
+
+        Parameters
+        ----------
+        module : str
+            Top-level package name of the model; only functions in
+            this package are traced.
+        logger : CallTraceLogger
+            Receives each completed trace via its ``log`` method.
+        max_typed_dict_size : int
+            Stored by the base class; unused by this subclass.
+        code_filter : CodeFilter, optional
+            Predicate limiting which code objects are traced.
+        sample_rate : int, optional
+            If given, only one in ``sample_rate`` calls is traced.
+        """
         super().__init__(logger, max_typed_dict_size, code_filter, sample_rate)
         self.module = module
 
     def handle_call(self, frame: FrameType) -> None:
+        """Start a trace for a call, capturing argument values.
+
+        Unlike the base class, the actual argument values (not their
+        types) are stored in the new :class:`CallTrace`.  Honors
+        ``sample_rate``, skips frames whose function cannot be
+        resolved, and ignores resumed generator frames already present
+        in ``self.traces``.
+        """
         if self.sample_rate and random.randrange(self.sample_rate) != 0:
             return
         func = self._get_func(frame)
@@ -284,6 +444,17 @@ class MxCallTracer(CallTracer):
         self.traces[frame] = CallTrace(func, arg_vals)
 
     def handle_return(self, frame: FrameType, arg: Any) -> None:
+        """Record the return (or yield) value and log the trace.
+
+        The last executed opcode distinguishes a genuine return from an
+        unwind due to an unhandled exception: on ``YIELD_VALUE`` the
+        value is stored as the return value and the frame stays active;
+        on ``RETURN_VALUE`` (or ``RETURN_CONST`` on Python 3.12/3.13)
+        ``arg`` is stored as the return value.  In every non-yield case
+        the trace is removed from ``self.traces`` and passed to
+        ``self.logger.log`` -- after an exceptional unwind, without a
+        return value.
+        """
         # In the case of a 'return' event, arg contains the return value, or
         # None, if the block returned because of an unhandled exception. We
         # need to distinguish the exceptional case (not a valid return type)
@@ -317,6 +488,14 @@ class MxCallTracer(CallTracer):
             self.logger.log(trace)
 
     def __call__(self, frame: FrameType, event: str, arg: Any) -> "CallTracer":
+        """Profile callback dispatching call and return events.
+
+        Skips unsupported events, code objects named ``trace_types``
+        and code rejected by the code filter, then additionally
+        requires the function's top-level module name to equal
+        ``self.module``.  Exceptions raised while collecting a trace
+        are logged, never propagated.
+        """
         code = frame.f_code
         if (
             event not in SUPPORTED_EVENTS
@@ -344,8 +523,16 @@ class MxCallTracer(CallTracer):
 
 
 class MxCodeFilter:
+    """Code filter selecting modelx model code objects to trace.
+
+    Accepts only code objects whose function name is a formula
+    (``_f_*``), ``_mx_assign_refs``, or ``__call__``, and whose file
+    name ends with ``_mx_model.py`` or ``_mx_classes.py`` (only a
+    filename-suffix comparison is performed, for speed).
+    """
 
     def __call__(self, code):
+        """Return ``True`` if the code object should be traced."""
         # Since called many times, check module name and function name only
         if (
             code.co_filename[-len(MX_MODEL_MOD) - 3: -3] == MX_MODEL_MOD
@@ -362,9 +549,42 @@ class MxCodeFilter:
 
 
 class MxCallTraceLogger(CallTraceLogger):
-    """Log and store/print records collected by a CallTracer."""
+    """Log and store/print records collected by a CallTracer.
+
+    Accumulates raw :class:`CallTrace` records grouped by fully
+    qualified function name, then on :meth:`flush` distills them into
+    runtime type information for cells, refs and itemspace parameters.
+
+    Attributes
+    ----------
+    module : str
+        Top-level package name of the traced model.
+    new_name : str or None
+        If set, :meth:`flush` renames the model root component of all
+        recorded dotted names to this name.
+    cells_info : dict
+        Fully qualified cells name to :class:`RuntimeCellsInfo`,
+        populated by :meth:`flush`.
+    ref_info : dict
+        Fully qualified ref name to :class:`RuntimeRefInfo`, populated
+        by :meth:`flush`.
+    modules : list of str
+        Dotted names of the modules in which traced cells are defined.
+    param_info : dict
+        Fully qualified space class name to a dict mapping parameter
+        names to :class:`RuntimeParamInfo`.
+    """
 
     def __init__(self, module: str, new_model_name: str = None) -> None:
+        """Initialize empty stores.
+
+        Parameters
+        ----------
+        module : str
+            Top-level package name of the traced model.
+        new_model_name : str, optional
+            New model root name applied by :meth:`flush`.
+        """
         super().__init__()
         self.module = module
         self.new_name = new_model_name
@@ -375,10 +595,27 @@ class MxCallTraceLogger(CallTraceLogger):
         self.param_info = {}  # class name -> {param: RuntimeParamInfo}
 
     def log(self, trace: CallTrace) -> None:
-        """Log a single call trace."""
+        """Log a single call trace.
+
+        The trace is appended to an internal list keyed by its fully
+        qualified function name, for aggregation in :meth:`flush`.
+        """
         self._traces.setdefault(trace.funcname, []).append(trace)
 
     def flush(self) -> None:
+        """Aggregate the accumulated traces into runtime info objects.
+
+        Traces of ``_mx_assign_refs`` provide refs: each user-defined
+        attribute of the traced ``self`` (taken from the first trace
+        only) becomes a :class:`RuntimeRefInfo` in ``ref_info``.  All
+        other traces (formula methods and space ``__call__`` methods
+        admitted by the code filter) are treated as cells: each group
+        builds a :class:`RuntimeCellsInfo` in ``cells_info`` and
+        registers its module in ``modules``.  The raw traces are then cleared,
+        itemspace parameters are collected by walking the model, and,
+        if a new model name was given, the model root component of all
+        stored names is renamed to it.
+        """
         for k, v in self._traces.items():
 
             name_split = k.split(".")
@@ -402,7 +639,11 @@ class MxCallTraceLogger(CallTraceLogger):
             self._update_model_name()
 
     def _update_model_name(self):
-        """Change the model name stored in members"""
+        """Change the model name stored in members
+
+        Replace the first (model root) component of the keys, module
+        names and ``mx_class`` values with ``self.new_name``.
+        """
 
         
         for i, v in enumerate(self.modules):
@@ -427,6 +668,8 @@ class MxCallTraceLogger(CallTraceLogger):
             self.param_info[replace_first_name(key, self.new_name)] = params
 
     def _get_params(self):
+        """Find the model instance in the ``_mx_model`` module and walk
+        each of its top-level spaces to collect itemspace parameters."""
         module = sys.modules[self.module + "." + MX_MODEL_MOD]
         base_cls = getattr(sys.modules[self.module + "." + MX_SYS_MOD], BASE_MODEL)
         model_cls = next(v for v in module.__dict__.values() if isinstance(v, type) and issubclass(v, base_cls))
@@ -436,6 +679,9 @@ class MxCallTraceLogger(CallTraceLogger):
             self._walk_space(space, {})
 
     def _walk_space(self, top_space, params):
+        """Recursively record itemspace parameter values as
+        :class:`RuntimeParamInfo` in ``param_info``, keyed by space
+        class name."""
         for space in top_space._mx_walk():
 
             if params:
@@ -467,7 +713,31 @@ def trace_calls(
     code_filter: Optional[CodeFilter] = None,
     sample_rate: Optional[int] = None,
 ) -> Iterator[None]:
-    """Enable call tracing for a block of code"""
+    """Enable call tracing for a block of code
+
+    A context manager that installs an :class:`MxCallTracer` as the
+    profile function via :func:`sys.setprofile` for the duration of
+    the ``with`` block.  On exit, the previous profile function is
+    restored and ``logger.flush()`` is called.
+
+    Parameters
+    ----------
+    module : str
+        Top-level package name of the model to trace.
+    logger : CallTraceLogger
+        Receives and aggregates the collected traces.
+    max_typed_dict_size : int
+        Passed through to the tracer (unused by it).
+    code_filter : CodeFilter, optional
+        Predicate limiting which code objects are traced.
+    sample_rate : int, optional
+        If given, only one in ``sample_rate`` calls is traced.
+
+    Yields
+    ------
+    None
+        Control returns to the caller with tracing active.
+    """
     old_trace = sys.getprofile()
     sys.setprofile(
         MxCallTracer(module, logger, max_typed_dict_size, code_filter, sample_rate)

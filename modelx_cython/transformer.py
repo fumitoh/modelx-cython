@@ -12,6 +12,27 @@
 # You should have received a copy of the GNU Lesser General Public
 # License along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
+"""Rewrite exported model modules for Cython and emit .pxd declarations.
+
+This module implements the code-generation stage of mx2cy. Given the
+combined lexical and runtime information in a
+:class:`~modelx_cython.builder.ModuleInfo`, it provides:
+
+* :class:`PXDGenerator`, which renders a Cython ``.pxd`` declaration
+  file for a model module from string templates.
+* :class:`ModuleTransformer`, a libcst transformer that rewrites the
+  module source into Cython pure-Python mode by injecting cimports,
+  decorating space classes and methods, declaring cache variables and
+  typed attributes, replacing arrayable cells' method bodies with
+  C-array cache lookups, and prepending dict-cache initialization to
+  the other cells with parameters.
+
+The Cython decorators are written through the module's cython import
+alias ``_mx_cy`` (for example ``@_mx_cy.cclass`` for
+``cython.cclass``), which :meth:`ModuleTransformer.leave_Module`
+injects as ``import cython as _mx_cy``.
+"""
+
 from typing import Union, Sequence, Mapping
 try:
     from types import NoneType
@@ -50,6 +71,32 @@ from modelx_cython.consts import (
 from modelx_cython.typedefs import CY_BOOL_T
 
 class PXDGenerator:
+    """Generate a Cython ``.pxd`` declaration file for a model module.
+
+    Renders the textual content of the ``.pxd`` file matching the
+    ``.py`` module produced by :class:`ModuleTransformer`. For each
+    space class (``_c_``-prefixed) in the module, a ``cdef class``
+    block deriving from ``_mx_sys.BaseSpace`` is emitted, declaring
+    cache variables, public refs and child-space attributes, and
+    ``cdef``/``cpdef`` method signatures.
+
+    Parameters
+    ----------
+    module : ModuleInfo
+        Combined lexical and runtime information for the module to
+        declare.
+
+    Attributes
+    ----------
+    pxd_template : str
+        Template for the whole file: cmodule cimports, the ``_mx_sys``
+        cimport, child-space cimports, then class definitions.
+    cls_template : str
+        Template for one ``cdef class`` block, including the
+        ``_mx_copy_refs`` declaration.
+    module : ModuleInfo
+        The module being declared.
+    """
 
     pxd_template = textwrap.dedent("""\
     {cmodule_imports}
@@ -72,14 +119,26 @@ class PXDGenerator:
     """)
 
     def __init__(self, module: ModuleInfo):
+        """Store the ``ModuleInfo`` to generate declarations for."""
         self.module = module
 
     @cached_property
     def package(self) -> str:
+        """Top-level package name.
+
+        The first dotted component of the module's fully qualified
+        name.
+        """
         return self.module.fqname.split(".")[0]
 
     @cached_property
     def cmodule_imports(self) -> str:
+        """``cimport`` statements for external C modules.
+
+        One ``cimport <name>`` line per entry in the module's
+        ``cimports`` (modules that provide declared ref types), joined
+        with newlines.
+        """
         stmts = []
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
@@ -87,6 +146,11 @@ class PXDGenerator:
 
     @cached_property
     def code(self):
+        """Full text of the ``.pxd`` file.
+
+        Fills ``pxd_template`` with the package name, cmodule
+        cimports, child-space cimports and the class definitions.
+        """
         return self.pxd_template.format(
             package=self.package,
             cmodule_imports=self.cmodule_imports,
@@ -97,12 +161,30 @@ class PXDGenerator:
 
     @cached_property
     def class_defs(self):
+        """``cdef class`` blocks for every class in the module.
+
+        One block per class, rendered by :meth:`a_class_def` and
+        joined by blank lines.
+        """
         stmts = []
         for cls in self.module.classes.keys():
             stmts.append(self.a_class_def(cls))
         return "\n\n".join(stmts)
 
     def a_class_def(self, name):
+        """Render the ``cdef class`` block for one space class.
+
+        Parameters
+        ----------
+        name : str
+            Name of the class (``_c_``-prefixed).
+
+        Returns
+        -------
+        str
+            ``cls_template`` filled with the class's variable and
+            method declarations, indented for the class body.
+        """
         return self.cls_template.format(
             class_name=name,
             MX_SYS_MOD=MX_SYS_MOD,
@@ -115,6 +197,11 @@ class PXDGenerator:
 
     @cached_property
     def child_cimports(self):
+        """``cimport`` lines for child-space submodules.
+
+        One ``from cython.cimports.<parent> import <child>`` line per
+        submodule, where ``<parent>`` is the module's parent package.
+        """
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
@@ -124,6 +211,25 @@ class PXDGenerator:
         return "".join(stmts)
 
     def private_var_defs(self, cls_name):
+        """``cdef`` declarations for a class's cells cache variables.
+
+        For each non-special cells: a cells with parameters gets a
+        C-array value cache ``_v_<name>`` and a ``bint`` flag array
+        ``_has_<name>`` when typed and arrayable, or a single
+        ``cdef dict _v_<name>`` otherwise; a cells without parameters
+        gets a scalar ``_v_<name>`` of its return type plus a ``bint``
+        flag ``_has_<name>``.
+
+        Parameters
+        ----------
+        cls_name : str
+            Name of the class whose cells caches are declared.
+
+        Returns
+        -------
+        str
+            Concatenated declaration lines.
+        """
 
         cls_info = self.module.classes[cls_name]
         decl_stmts = []
@@ -162,6 +268,23 @@ class PXDGenerator:
         return "".join(decl_stmts)
 
     def public_var_defs(self, cls_name):
+        """``cdef public`` declarations for refs and child spaces.
+
+        Emits one typed ``cdef public`` line per ref, followed by one
+        line per child space typed as
+        ``<module>._mx_classes._c_<space>``, where ``<module>`` is the
+        class's own submodule (``_m_`` plus the class name suffix).
+
+        Parameters
+        ----------
+        cls_name : str
+            Name of the class whose attributes are declared.
+
+        Returns
+        -------
+        str
+            Concatenated declaration lines.
+        """
 
         decl_stmts = []
         for ref in self.module.classes[cls_name].refs.values():
@@ -188,6 +311,11 @@ class PXDGenerator:
     def _add_param_type_hints(
         self, cls_name: str, cells_name: str
     ) -> str:
+        """Build the C-style parameter list for a cells method.
+
+        Starts with ``<cls_name> self``; parameter types come from the
+        traced type info when available, otherwise ``object``.
+        """
 
         cells = self.module.classes[cls_name].cells[cells_name]
         params = [f"{cls_name} {MX_SELF}"]  # add self first
@@ -207,6 +335,22 @@ class PXDGenerator:
         return ", ".join(params)
 
     def private_meth_defs(self, cls_name):
+        """``cdef`` declarations for ``_f_``-prefixed formula methods.
+
+        One declaration per non-special cells; the return type comes
+        from the traced type info when available, otherwise
+        ``object``.
+
+        Parameters
+        ----------
+        cls_name : str
+            Name of the class whose formula methods are declared.
+
+        Returns
+        -------
+        str
+            Concatenated declaration lines.
+        """
 
         decl_stmts = []
         for cells in self.module.classes[cls_name].cells.values():
@@ -237,6 +381,21 @@ class PXDGenerator:
         return "".join(decl_stmts)
 
     def public_meth_defs(self, cls_name):
+        """``cpdef`` declarations for public cells methods.
+
+        One declaration per non-special cells, mirroring
+        :meth:`private_meth_defs` but without the ``_f_`` prefix.
+
+        Parameters
+        ----------
+        cls_name : str
+            Name of the class whose cells methods are declared.
+
+        Returns
+        -------
+        str
+            Concatenated declaration lines.
+        """
 
         decl_stmts = []
         for cells in self.module.classes[cls_name].cells.values():
@@ -268,6 +427,33 @@ class PXDGenerator:
 
 
 class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
+    """Rewrite a model module into Cython pure-Python mode.
+
+    A libcst transformer that injects cimports of ``_mx_sys`` and
+    child-space modules, decorates space classes with
+    ``@_mx_cy.cclass`` (``cython.cclass`` via the module's cython
+    alias), declares cache variables, refs and child spaces as
+    class-level annotations, strips cache initialization from
+    ``__init__``, and rewrites methods with Cython decorators, type
+    annotations and caching bodies.
+
+    Parameters
+    ----------
+    source : str
+        Source code of the module to transform.
+    module : ModuleInfo
+        Combined lexical and runtime information for the module.
+
+    Attributes
+    ----------
+    wrapper : libcst.metadata.MetadataWrapper
+        Metadata wrapper around the parsed source module.
+    module : ModuleInfo
+        The module information passed to the constructor.
+    package : str
+        Top-level package name of the module.
+    """
+
     METADATA_DEPENDENCIES = (ScopeProvider, ParentNodeProvider)
 
     def __init__(
@@ -275,6 +461,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         source: str,
         module: ModuleInfo
     ) -> None:
+        """Parse ``source`` and record the module info and package."""
         super().__init__()
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self._module_node = self.wrapper.module
@@ -283,9 +470,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
+        """Transformed module tree.
+
+        Each access re-runs the transformation by visiting the
+        wrapped module with this transformer.
+        """
         return self.wrapper.visit(self)
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
+        """Prepend cimports of ``_mx_sys`` and each child-space module,
+        plus ``import cython as _mx_cy``, to the module body."""
 
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
@@ -313,6 +507,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     def leave_ClassDef(
         self, original_node: ClassDef, updated_node: ClassDef
     ) -> Union[BaseStatement, FlattenSentinel[BaseStatement], RemovalSentinel]:
+        """Add ``@_mx_cy.cclass`` to top-level space classes and
+        prepend class-level annotations for cells cache variables,
+        refs and child-space attributes; other classes pass through
+        unchanged."""
         cls_name: str = original_node.name.value
         if cls_name[: len(SPACE_PREF)] == SPACE_PREF and isinstance(
             self.get_metadata(ScopeProvider, original_node), GlobalScope
@@ -441,6 +639,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     @m.call_if_inside(m.FunctionDef(name=cst.Name("__init__")))
     @m.leave(m.SimpleStatementLine())
     def remove_cache_assigns(self, original_node, updated_node):
+        """Remove ``self._v_*`` and ``self._has_*`` assignments from
+        the ``__init__`` body of a space class."""
         funcdef = self.get_parent(original_node, level=2)
         clsdef = self.get_parent(funcdef, level=2)
         if (
@@ -468,6 +668,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     def _add_param_type_hints(
         self, funcdef: cst.FunctionDef, cls_name: str
     ) -> Union[cst.Parameters, NoneType]:
+        """Return ``funcdef``'s parameters with type annotations from
+        the traced types (falling back to ``object`` when no type
+        information was sampled) added to the non-self parameters,
+        looking up the cells by the method name with any ``_f_``
+        prefix stripped."""
         param_list = list(funcdef.params.params + funcdef.params.posonly_params)[
             1:
         ]  # remove self
@@ -505,11 +710,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     @m.call_if_inside(m.Attribute())
     @m.leave(m.Name(value="base"))
     def rename_base(self, original_node, updated_node):
+        """Rename ``base`` to ``base_`` in attribute assignments inside
+        ``_mx_copy_refs`` method bodies."""
         return updated_node.with_changes(value="base_")
 
     @m.call_if_inside(m.ClassDef())
     @m.leave(m.FunctionDef())
     def update_method(self, original_node, updated_node):
+        """Rewrite space-class methods: ``_f_*`` formulas to typed
+        ``@_mx_cy.cfunc``, ``_mx_copy_refs`` to ``@_mx_cy.ccall`` with
+        a cast of ``base``, ``__call__`` parameter hints, and cells to
+        typed ``@_mx_cy.ccall`` with array- or dict-cache bodies."""
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
