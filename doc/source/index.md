@@ -32,8 +32,7 @@ installation
 tutorial
 cli
 spec
-architecture
-api/index
+implementation
 ```
 
 ## See also

@@ -1,4 +1,4 @@
-# API reference
+# Module reference
 
 This section documents the modules of the `modelx_cython` package.
 
