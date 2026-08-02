@@ -31,7 +31,7 @@ pytest                                                    # All tests (2-5 min)
 pytest modelx_cython/tests/test_config.py -v             # Config tests (<1s)
 pytest modelx_cython/tests/test_samples.py::test_no_spec -v  # Specific (5-15s)
 ```
-**Requires**: `lifelib` for integration tests | **Structure**: Unit tests in `test_config.py`, integration in `test_samples.py` (15 scenarios in `tests/samples/`)
+**Requires**: `lifelib` for integration tests | **Structure**: Unit tests in `test_config.py`, integration in `test_samples.py` and `test_annuallife.py` (16 scenarios in `tests/samples/`)
 
 ## Repository Structure
 
@@ -40,7 +40,7 @@ pytest modelx_cython/tests/test_samples.py::test_no_spec -v  # Specific (5-15s)
 **Main Package** (`modelx_cython/`) - Data flow order:
 1. `cli.py` - Entry point (`mx2cy` command) | 2. `tracer.py` - Runtime type collection (MonkeyType) | 3. `parser.py` - Parse models (libcst) | 4. `builder.py` - Combine parse/trace info | 5. `transformer.py` - Python→Cython transformation | 6. `config.py` - Config/spec handling | 7. `typedefs.py` - Type helpers | 8. `consts.py` - Constants/naming | 9. `monkeytype_tracing.py` - Custom tracer | 10. `_mx_sys.pxd` - Cython declarations | 11. `__init__.py` - Version (version_info tuple)
 
-**Tests** (`modelx_cython/tests/`): `test_config.py` (unit), `test_samples.py` (integration, parameterized), `samples/` (13 scenarios: array_size, basicterm_s, basicterm_sc, deep_recursion, duplicated_params, index_range, nested_params, no_spec, ref_space, size_spec_change, various_types, varying_integral_types_of_args, varying_types_of_args)
+**Tests** (`modelx_cython/tests/`): `test_config.py` (unit), `test_samples.py` and `test_annuallife.py` (integration, parameterized), `samples/` (16 scenarios: array_size, array_usage, basicterm_s, basicterm_sc, deep_recursion, duplicated_params, index_range, nested_params, no_spec, ref_space, size_spec_change, tradlife_a, tradlife_a_ex1, various_types, varying_integral_types_of_args, varying_types_of_args)
 
 ## Workflow & Usage
 
