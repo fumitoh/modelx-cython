@@ -68,8 +68,17 @@ intersphinx_mapping = {
 # -- Options for HTML output -------------------------------------------------
 
 try:
-    import sphinx_rtd_theme  # noqa: F401
+    import pydata_sphinx_theme  # noqa: F401
 
-    html_theme = "sphinx_rtd_theme"
+    html_theme = "pydata_sphinx_theme"
+    html_theme_options = {
+        "icon_links": [
+            {
+                "name": "GitHub",
+                "url": "https://github.com/fumitoh/modelx-cython",
+                "icon": "fa-brands fa-github",
+            },
+        ],
+    }
 except ImportError:
     html_theme = "alabaster"

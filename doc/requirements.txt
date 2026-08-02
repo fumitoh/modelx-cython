@@ -6,4 +6,4 @@
 #   sphinx-build -b html doc/source doc/build/html
 sphinx>=7
 myst-parser>=2
-sphinx-rtd-theme>=2
+pydata-sphinx-theme>=0.15
