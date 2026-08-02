@@ -31,6 +31,7 @@ from modelx_cython.tracer import RuntimeCellsInfo, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
 
 from modelx_cython.consts import (
+    FORMULA_PREF,
     SPACE_PREF,
     MODULE_PREF,
     CY_MOD
@@ -65,8 +66,20 @@ class CombinedCellsInfo(LexicalCellsInfo):
             # their public method is the formula itself.
             self.has_formula_def = lx_info.name in visitor.formula_defs.get(
                 lx_info.cls, ())
+            # Closures (nested defs, lambdas, generator expressions, yield)
+            # cannot be compiled inside cpdef (ccall) functions, so public
+            # methods containing them are left as plain Python methods and
+            # omitted from the pxd. cdef (cfunc) formula methods support
+            # closures but not yield.
+            self.body_has_closure = lx_info.name in visitor.closure_funcs.get(
+                lx_info.cls, ())
+            self.formula_is_generator = (
+                FORMULA_PREF + lx_info.name
+                in visitor.generator_funcs.get(lx_info.cls, ()))
         else:   # constructed without a ClassInfo (tests)
             self.has_formula_def = True
+            self.formula_is_generator = False
+            self.body_has_closure = False
         self._rt = rt_info
         self._spec = spec
         self._spec_ret_t = spec.get(TransSpec.RET_T, "")

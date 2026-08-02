@@ -109,8 +109,27 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.spaces = {}  # Parent class name to list of child space names
         self.cimports = []
         self.formula_defs = {}  # {class_name: set of cells names with _f_ defs}
+        self.closure_funcs = {}  # {class_name: set of method names containing closures}
+        self.generator_funcs = {}  # {class_name: set of method names containing yield}
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
+
+    _closure_matcher = (
+        m.FunctionDef() | m.Lambda() | m.GeneratorExp() | m.Yield())
+
+    def _has_closure(self, funcdef: cst.FunctionDef) -> bool:
+        """True if the function body contains a construct that Cython
+        compiles as a closure (nested function, lambda, generator
+        expression or yield), which is not supported inside cpdef
+        (ccall) functions. cdef (cfunc) functions support closures."""
+        return bool(m.findall(funcdef.body, self._closure_matcher))
+
+    def _is_generator(self, funcdef: cst.FunctionDef) -> bool:
+        """True if the function body contains a yield, which is not
+        supported inside either cdef or cpdef functions. A yield inside
+        a nested def is a rare false positive; the resulting fallback to
+        a plain Python method is safe."""
+        return bool(m.findall(funcdef.body, m.Yield()))
 
     @m.leave(m.ClassDef())
     def collect_classes(self, original_node):
@@ -185,6 +204,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
                 name = original_node.name.value
                 self.formula_defs.setdefault(cls_name, set()).add(
                     name[len(FORMULA_PREF):])
+                if self._is_generator(original_node):
+                    self.generator_funcs.setdefault(cls_name, set()).add(name)
             elif original_node.name.value[: len(GLOBAL_PREF)] == GLOBAL_PREF:
                 # _mx_ methods
                 pass
@@ -203,6 +224,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
                              + original_node.params.posonly_params
                     if p.name.value != MX_SELF
                 ]
+                if self._has_closure(original_node):
+                    self.closure_funcs.setdefault(cls_name, set()).add(name)
 
                 ci = LexicalCellsInfo(
                     module=self.module,
