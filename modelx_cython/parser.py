@@ -54,10 +54,12 @@ class LexicalBaseMemberInfo:
 class LexicalCellsInfo(LexicalBaseMemberInfo):
 
     params: Sequence[str]
+    params_with_defaults: Sequence[str]
 
-    def __init__(self, module, cls, name, params) -> None:
+    def __init__(self, module, cls, name, params, params_with_defaults=()) -> None:
         super().__init__(module, cls, name)
         self.params: Sequence[str] = params
+        self.params_with_defaults: Sequence[str] = params_with_defaults
 
     def is_special(self):
         return self.name[:2] == self.name[-2:] == "__"
@@ -113,6 +115,21 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.generator_funcs = {}  # {class_name: set of method names containing yield}
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
+        self.kwarg_called_names = self._collect_kwarg_called_names()
+
+    def _collect_kwarg_called_names(self):
+        """Names of functions/methods called with keyword arguments anywhere
+        in the module. Cython compiles C-level calls as positional-only, so
+        cells called with keyword arguments must stay plain Python methods."""
+        names = set()
+        for call in m.findall(self.wrapper.module, m.Call()):
+            if any(a.keyword is not None or a.star == "**" for a in call.args):
+                func = call.func
+                if isinstance(func, cst.Attribute):
+                    names.add(func.attr.value)
+                elif isinstance(func, cst.Name):
+                    names.add(func.value)
+        return names
 
     _closure_matcher = (
         m.FunctionDef() | m.Lambda() | m.GeneratorExp() | m.Yield())
@@ -218,11 +235,15 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
             else:
                 # cells
                 name = original_node.name.value
-                params = [
-                    p.name.value
+                param_nodes = [
+                    p
                     for p in original_node.params.params
                              + original_node.params.posonly_params
                     if p.name.value != MX_SELF
+                ]
+                params = [p.name.value for p in param_nodes]
+                params_with_defaults = [
+                    p.name.value for p in param_nodes if p.default is not None
                 ]
                 if self._has_closure(original_node):
                     self.closure_funcs.setdefault(cls_name, set()).add(name)
@@ -231,7 +252,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
                     module=self.module,
                     cls=cls_name,
                     name=name,
-                    params=params
+                    params=params,
+                    params_with_defaults=params_with_defaults
                 )
                 self.cells_info.setdefault(cls_name, {})[name]  = ci
 

@@ -192,14 +192,17 @@ class PXDGenerator:
         cells = self.module.classes[cls_name].cells[cells_name]
         params = [f"{cls_name} {MX_SELF}"]  # add self first
 
-        # Add parameter type hints
+        # Add parameter type hints. Parameters with default values are
+        # marked with '=*' as required for pxd declarations.
         if cells and cells.has_typeinfo() and cells.has_args():
             for param in cells.params:
                 type_ = cells.get_argtype_expr(param, c_style=True)
-                params.append(f"{type_} {param}")
+                default = "=*" if param in cells.params_with_defaults else ""
+                params.append(f"{type_} {param}{default}")
         else:
             for p in cells.params:
-                params.append(f"object {p}")
+                default = "=*" if p in cells.params_with_defaults else ""
+                params.append(f"object {p}{default}")
 
         return ", ".join(params)
 
@@ -241,7 +244,7 @@ class PXDGenerator:
             if cells.is_special():
                 continue
 
-            if cells.body_has_closure:
+            if cells.body_has_closure or cells.called_with_kwargs:
                 # stays a plain Python method
                 continue
 
@@ -599,13 +602,19 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # leave as a plain Python method
                     return updated_node
 
-                decorators = [
-                    cst.Decorator(
-                        decorator=cst.Attribute(
-                            value=cst.Name(CY_MOD), attr=cst.Name("ccall")
+                if cells.called_with_kwargs:
+                    # C-level calls are positional-only, so a cells called
+                    # with keyword arguments keeps a plain Python public
+                    # method (its _f_ formula stays compiled)
+                    decorators = []
+                else:
+                    decorators = [
+                        cst.Decorator(
+                            decorator=cst.Attribute(
+                                value=cst.Name(CY_MOD), attr=cst.Name("ccall")
+                            )
                         )
-                    )
-                ]
+                    ]
                 # Return type
                 returns = cst.Annotation(
                     annotation=cst.parse_expression(
