@@ -58,6 +58,15 @@ class CombinedCellsInfo(LexicalCellsInfo):
             lx_info.module, lx_info.cls, lx_info.name, lx_info.params
         )
         self.parent = cls_info
+        visitor = getattr(cls_info, "visitor", None)
+        if visitor is not None:
+            # True if a _f_<name> formula method exists in the source.
+            # Cells that modelx exports as uncached have no _f_ method:
+            # their public method is the formula itself.
+            self.has_formula_def = lx_info.name in visitor.formula_defs.get(
+                lx_info.cls, ())
+        else:   # constructed without a ClassInfo (tests)
+            self.has_formula_def = True
         self._rt = rt_info
         self._spec = spec
         self._spec_ret_t = spec.get(TransSpec.RET_T, "")

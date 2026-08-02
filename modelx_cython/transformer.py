@@ -135,6 +135,11 @@ class PXDGenerator:
             if cells.is_special():
                 continue
 
+            if not cells.has_formula_def:
+                # uncached cells: the public method is the formula itself
+                # and no cache storage exists
+                continue
+
             if cells.has_args():
                 if cells.has_typeinfo() and cells.is_arrayable():
 
@@ -204,6 +209,10 @@ class PXDGenerator:
         for cells in self.module.classes[cls_name].cells.values():
 
             if cells.is_special():
+                continue
+
+            if not cells.has_formula_def:
+                # no _f_ method exists
                 continue
 
             if cells and cells.has_typeinfo():
@@ -309,6 +318,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 assert cells.cls == cls_name
 
                 if cells.is_special():
+                    continue
+
+                if not cells.has_formula_def:
+                    # uncached cells: the public method is the formula itself
+                    # and no cache storage exists
                     continue
 
                 if cells.has_args():
@@ -590,6 +604,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     parameters = self._add_param_type_hints(
                         updated_node, cls_name=cls_name
                     )
+                    if not cells.has_formula_def:
+                        # uncached cells: the body is the formula itself;
+                        # leave it untouched
+                        return updated_node.with_changes(
+                            decorators=decorators,
+                            params=parameters,
+                            returns=returns,
+                        )
                     if cells.has_typeinfo() and cells.is_arrayable():
 
                         # Construct indented_block to replace the original one
