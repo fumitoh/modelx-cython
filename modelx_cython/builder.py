@@ -227,6 +227,8 @@ class CombinedRefInfo:
     def get_type_expr(self, c_style=False):
         if self.decl_type_expr:
             return self.decl_type_expr
+        elif self.type_ is None:    # no runtime info sampled
+            return "object"
         else:
             return get_type_expr(self.type_, c_style=c_style)
 

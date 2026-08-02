@@ -163,6 +163,10 @@ class PXDGenerator:
 
             assert ref.module == self.module.fqname and ref.cls == cls_name
 
+            if ref.name in self.module.classes[cls_name].spaces:
+                # declared below as a child space
+                continue
+
             stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
             decl_stmts.append(stmt)
 
@@ -356,6 +360,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             for ref in self.module.classes[cls_name].refs.values():
 
                 assert ref.module == self.module.fqname and ref.cls == cls_name
+
+                if ref.name in self.module.classes[cls_name].spaces:
+                    # declared below as a child space
+                    continue
 
                 stmt = cst.parse_statement(
                     f"{ref.name}: {ref.get_type_expr()}",

@@ -128,12 +128,21 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
 
-        # Phase 1: parse all sources and build all module infos
+        # Phase 1: parse all sources and build all module infos.
+        # Every model/space module is translated, including those whose
+        # cells the sample never exercised (e.g. enum-only spaces):
+        # other modules may reference their classes in pxd declarations,
+        # so their pxd files must exist.
         units = []
-        for m in logger.modules:
+        for m, src_path in iter_module_files(model_path):
             subs = m.split(".")
             assert subs.pop(0) == model_path.name
             assert subs[-1] in [MX_MODEL_MOD, MX_SPACE_MOD]
+            if subs[-1] == MX_MODEL_MOD and m not in logger.modules:
+                # The model module defines the model class, which the
+                # transformer does not handle; it is translated only when
+                # the sample traced cells in it.
+                continue
             pxd_path = subs.copy()
             subs[-1] = subs[-1] + ".py"
             pxd_path[-1] = pxd_path[-1] + ".pxd"
@@ -150,15 +159,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         # Phase 2: classify cross-module usage of array-returning cells
         # so that get_rettype_expr can fall back to object where needed.
-        # Modules whose cells the sample never exercised are not transformed,
-        # but their formulas may still consume traced cells, so they are
-        # parsed for the analysis as well.
         pairs = [(u.visitor, u.module_info) for u in units]
-        traced = {u.fqname for u in units}
-        for m, src_path in iter_module_files(model_path):
-            if m not in traced:
-                visitor = ModuleVisitor(module=m, source=src_path.read_text(encoding="utf-8"))
-                pairs.append((visitor, ModuleInfo(m, visitor, logger, spec)))
         apply_verdicts(pairs, analyze_usage(pairs))
 
         # Phase 3: transform and write out
