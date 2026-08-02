@@ -42,11 +42,15 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    types, and space parameter types, and records the maximum observed
    value of every integer argument.
 
-3. **Parse** — each traced model module is parsed with
+3. **Parse** — every model module is parsed with
    [libcst](https://libcst.readthedocs.io/), and
    {py:class}`~modelx_cython.parser.ModuleVisitor` collects the lexical
-   structure: space classes, their cells methods and parameters, their
-   refs, and their child spaces.
+   structure: space classes, their cells methods and parameters
+   (including which parameters have default values), their refs, and
+   their child spaces.  All space modules are included even when the
+   sample never exercised their cells, since other modules may
+   reference their classes; an `_mx_model` module is included only
+   when the sample traced cells in it.
 
 4. **Build** — {py:class}`~modelx_cython.builder.ModuleInfo` merges the
    three information sources — lexical structure, runtime traces, and the
@@ -70,7 +74,12 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    and C-array-backed caching bodies for cells with integer parameters.
    In parallel, {py:class}`~modelx_cython.transformer.PXDGenerator` emits
    a `.pxd` declaration file per module so that modules can `cimport`
-   each other.
+   each other.  Methods Cython cannot compile at the C level are left
+   as plain Python methods: cells whose bodies contain closures
+   (nested functions, lambdas, generator expressions or `yield`),
+   formulas containing `yield`, and cells called with keyword
+   arguments anywhere in the model, since C-level calls are
+   positional-only.
 
 7. **Compile** — {py:func}`modelx_cython.cli.create_setup` writes a
    `setup.py` that cythonizes all translated modules, and
@@ -102,25 +111,37 @@ The runtime type summaries follow a few widening rules, implemented in
 
 * Booleans map to C `bint`, integers to `long long`, and other real
   numbers to `double`.
-* If an argument or return value is observed with several integer types,
-  the types widen to a common integer; mixing integers and floats widens
-  to real; anything else falls back to `object`.
-* NumPy array returns keep their dtype and dimension count; arrays whose
-  dtype or ndim varies between calls, and cells that sometimes return
-  arrays and sometimes scalars, fall back to `object`.
+* A return value observed with several integer types widens to a common
+  integer, and mixing integer and float returns widens to real; anything
+  else falls back to `object`.
+* An argument observed with several integer types widens to a common
+  integer, and one observed with several `str` types collapses to `str`;
+  any other mixture — including integers mixed with floats — falls back
+  to `object`.
+* NumPy array returns keep their dtype and dimension count; when the
+  dtype varies between calls the element type widens by the same rules
+  as scalar returns.  Dtypes that cannot be widened, arrays whose ndim
+  varies, and cells that sometimes return arrays and sometimes scalars,
+  fall back to `object`.
 * Real-valued array returns are typed as `const` memoryviews (for
   example, `const double[:]`) subject to the usage analysis; the `const`
   element type lets read-only arrays, such as those produced by pandas
   under copy-on-write, be coerced.
 
-Each fallback or widening decision is logged at `INFO` level (run `mx2cy`
-with `--log-level INFO` to see them).
+Most fallback decisions — conflicting argument or return types,
+usage-analysis fallbacks, spec sizes overridden by observed maxima, and
+cells demoted to plain Python methods — are logged at `INFO` level (run
+`mx2cy` with `--log-level INFO` to see them).
 
 ## Cells caching in the compiled model
 
 A cells with no parameters is cached in a single typed variable plus a
 `_has_` flag.  A cells whose parameters are all integers and whose value
-is numeric is cached in a fixed-size C array indexed by its parameters,
+is a numeric scalar (not an array) is cached in a fixed-size C array
+indexed by its parameters,
 with a parallel boolean array of `_has_` flags; the array sizes come from
 the spec and the observed argument maxima (see {doc}`spec`).  All other
 cells fall back to a per-cells Python dict keyed by the argument tuple.
+Cells that modelx exports as *uncached* have no `_f_` formula method —
+their public method is the formula itself — and get no cache storage
+in the compiled model either.

@@ -99,6 +99,27 @@ class CombinedCellsInfo(LexicalCellsInfo):
         Value of the spec key ``"return_type"``, or ``""`` if absent.
     _force_memoryview : bool
         True when the spec sets ``"return_type": "memoryview"``.
+    called_with_kwargs : bool
+        True if a call with keyword arguments anywhere in the model
+        names a function matching this cells' name.  Cython C-level
+        (cpdef) calls are positional-only, so the public method then
+        stays a plain Python method.  ``False`` at construction time;
+        set by :func:`modelx_cython.cli.main_handler` after all
+        modules are parsed.
+    has_formula_def : bool
+        True if a ``_f_<name>`` formula method exists in the source.
+        Cells that modelx exports as uncached have no ``_f_`` method:
+        their public method is the formula itself, and no cache
+        storage is generated for them.
+    body_has_closure : bool
+        True if the public method's body contains a construct Cython
+        compiles as a closure (nested function, lambda, generator
+        expression or yield), which cpdef functions do not support;
+        the method then stays a plain Python method.
+    formula_is_generator : bool
+        True if the ``_f_`` formula method contains a ``yield``,
+        which neither cdef nor cpdef functions support; the formula
+        then stays a plain Python method.
 
     Raises
     ------
@@ -468,6 +489,7 @@ class CombinedRefInfo:
         """Return the type expression used to declare this ref.
 
         Returns ``decl_type_expr`` when the ref holds a model space;
+        ``"object"`` when the ref was never sampled at runtime;
         otherwise maps the sampled Python type through
         :func:`modelx_cython.typedefs.get_type_expr`.
 
@@ -514,16 +536,12 @@ class ClassInfo:
         Annotated only; never assigned.  Space parameters are stored
         in ``refs`` instead.
     _cells_max_args : dict
-        Maps a tuple of parameter names to maximum observed argument
-        values.  Currently these are the maxima of the first traced
-        cells seen for each parameter tuple; larger values observed
-        for later cells sharing the tuple are compared but not
-        merged back.
+        Maps a tuple of parameter names to the maximum argument
+        values observed across all traced cells sharing that
+        parameter tuple.
     _max_arg_cells : dict
-        Maps a parameter tuple to ``{param: cells fqname}`` naming,
-        for logging, the cells that produced the largest value
-        compared so far for each parameter (which, for later cells,
-        may not be the value kept in ``_cells_max_args``).
+        Maps a parameter tuple to ``{param: cells fqname}`` recording
+        which cells produced each maximum, for logging.
     """
 
     name: str
@@ -556,9 +574,8 @@ class ClassInfo:
         self._add_space_params()
 
     def _init_cells(self):
-        """Create a CombinedCellsInfo per lexical cells and record
-        observed maximum argument values per parameter tuple (see the
-        ``_cells_max_args`` attribute for the exact semantics).
+        """Create a CombinedCellsInfo per lexical cells and track the
+        maximum argument values observed per parameter tuple.
         """
         # .get: model classes and container-only spaces have no cells
         for name, lx_info in self.visitor.cells_info.get(self.name, {}).items():
@@ -642,9 +659,7 @@ class ClassInfo:
         argument value observed at runtime plus one whenever that is
         larger (an info message is logged); parameter tuples absent
         from the spec get their sizes solely from the observed maxima
-        plus one.  Note that for a parameter tuple shared by several
-        traced cells, the observed maxima currently come from the
-        first traced cells only (see ``_cells_max_args``).
+        plus one.
         """
         # params = self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS_PARAMS, {})
 

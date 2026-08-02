@@ -24,8 +24,8 @@ place.  The original package is never modified.
 : Path to an exported modelx model to translate into Cython.  The
   translated copy is created next to it, with `_cy` appended to its name.
   If a package with that name already exists, it is renamed with a
-  `_BAK1` suffix first (an older `_BAK1` becomes `_BAK2`, up to one
-  numbered backup by default).
+  `_BAK1` suffix first; an older `_BAK1` backup is deleted (only one
+  backup is kept).
 
 ## Options
 

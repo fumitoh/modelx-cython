@@ -27,6 +27,16 @@ combined lexical and runtime information in a
   C-array cache lookups, and prepending dict-cache initialization to
   the other cells with parameters.
 
+Methods that Cython cannot compile at the C level are left as plain
+Python methods and omitted from the ``.pxd`` declarations: public
+cells methods whose bodies contain closures (nested functions,
+lambdas, generator expressions or ``yield``), ``_f_`` formulas
+containing ``yield``, and cells called with keyword arguments
+anywhere in the model (C-level calls are positional-only; their
+``_f_`` formulas stay compiled).  Uncached cells, whose public
+method is the formula itself and which have no ``_f_`` method, keep
+their body and get no cache storage.
+
 The Cython decorators are written through the module's cython import
 alias ``_mx_cy`` (for example ``@_mx_cy.cclass`` for
 ``cython.cclass``), which :meth:`ModuleTransformer.leave_Module`
@@ -213,12 +223,13 @@ class PXDGenerator:
     def private_var_defs(self, cls_name):
         """``cdef`` declarations for a class's cells cache variables.
 
-        For each non-special cells: a cells with parameters gets a
-        C-array value cache ``_v_<name>`` and a ``bint`` flag array
-        ``_has_<name>`` when typed and arrayable, or a single
-        ``cdef dict _v_<name>`` otherwise; a cells without parameters
-        gets a scalar ``_v_<name>`` of its return type plus a ``bint``
-        flag ``_has_<name>``.
+        For each non-special cells with a ``_f_`` formula method: a
+        cells with parameters gets a C-array value cache ``_v_<name>``
+        and a ``bint`` flag array ``_has_<name>`` when typed and
+        arrayable, or a single ``cdef dict _v_<name>`` otherwise; a
+        cells without parameters gets a scalar ``_v_<name>`` of its
+        return type plus a ``bint`` flag ``_has_<name>``.  Uncached
+        cells (no ``_f_`` method) get no cache storage.
 
         Parameters
         ----------
@@ -270,8 +281,9 @@ class PXDGenerator:
     def public_var_defs(self, cls_name):
         """``cdef public`` declarations for refs and child spaces.
 
-        Emits one typed ``cdef public`` line per ref, followed by one
-        line per child space typed as
+        Emits one typed ``cdef public`` line per ref (skipping refs
+        that name a child space, which are declared below), followed
+        by one line per child space typed as
         ``<module>._mx_classes._c_<space>``, where ``<module>`` is the
         class's own submodule (``_m_`` plus the class name suffix).
 
@@ -315,6 +327,8 @@ class PXDGenerator:
 
         Starts with ``<cls_name> self``; parameter types come from the
         traced type info when available, otherwise ``object``.
+        Parameters with default values are suffixed with ``=*``, as
+        required in ``.pxd`` declarations.
         """
 
         cells = self.module.classes[cls_name].cells[cells_name]
@@ -339,7 +353,9 @@ class PXDGenerator:
 
         One declaration per non-special cells; the return type comes
         from the traced type info when available, otherwise
-        ``object``.
+        ``object``.  Cells without a ``_f_`` method (uncached) and
+        formulas containing ``yield`` (kept as plain Python methods)
+        are omitted.
 
         Parameters
         ----------
@@ -385,6 +401,9 @@ class PXDGenerator:
 
         One declaration per non-special cells, mirroring
         :meth:`private_meth_defs` but without the ``_f_`` prefix.
+        Cells whose bodies contain closures and cells called with
+        keyword arguments are omitted: their public methods stay
+        plain Python methods.
 
         Parameters
         ----------
@@ -508,9 +527,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self, original_node: ClassDef, updated_node: ClassDef
     ) -> Union[BaseStatement, FlattenSentinel[BaseStatement], RemovalSentinel]:
         """Add ``@_mx_cy.cclass`` to top-level space classes and
-        prepend class-level annotations for cells cache variables,
-        refs and child-space attributes; other classes pass through
-        unchanged."""
+        prepend class-level annotations for cells cache variables
+        (skipping uncached cells, which have none), refs (skipping
+        those also declared as child spaces) and child-space
+        attributes; other classes pass through unchanged."""
         cls_name: str = original_node.name.value
         if cls_name[: len(SPACE_PREF)] == SPACE_PREF and isinstance(
             self.get_metadata(ScopeProvider, original_node), GlobalScope
@@ -720,7 +740,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """Rewrite space-class methods: ``_f_*`` formulas to typed
         ``@_mx_cy.cfunc``, ``_mx_copy_refs`` to ``@_mx_cy.ccall`` with
         a cast of ``base``, ``__call__`` parameter hints, and cells to
-        typed ``@_mx_cy.ccall`` with array- or dict-cache bodies."""
+        typed ``@_mx_cy.ccall`` with array- or dict-cache bodies.
+
+        Cells Cython cannot compile at the C level fall back to plain
+        Python: ``_f_`` formulas containing ``yield`` and public
+        methods containing closures are returned unchanged, and cells
+        called with keyword arguments get type annotations but no
+        ``@_mx_cy.ccall`` decorator.  Uncached cells (no ``_f_``
+        method) get the decorator and annotations but keep their
+        original body, since it is the formula itself."""
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
