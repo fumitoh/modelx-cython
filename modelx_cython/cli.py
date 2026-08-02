@@ -33,6 +33,8 @@ from modelx_cython.parser import ModuleVisitor
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import analyze_usage, apply_verdicts
 
+_logger = logging.getLogger(__name__)
+
 
 def increment_backups(
         base_path: pathlib.Path,
@@ -161,6 +163,20 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # so that get_rettype_expr can fall back to object where needed.
         pairs = [(u.visitor, u.module_info) for u in units]
         apply_verdicts(pairs, analyze_usage(pairs))
+
+        # Cells called with keyword arguments anywhere in the model must
+        # keep plain Python public methods: Cython C-level calls are
+        # positional-only.
+        kwarg_names = set().union(
+            *(u.visitor.kwarg_called_names for u in units))
+        for u in units:
+            for cls_info in u.module_info.classes.values():
+                for cells in cls_info.cells.values():
+                    if cells.name in kwarg_names:
+                        cells.called_with_kwargs = True
+                        _logger.info(
+                            f"{cells.fqname} stays a Python method because "
+                            "a call with keyword arguments matches its name")
 
         # Phase 3: transform and write out
         for u in units:

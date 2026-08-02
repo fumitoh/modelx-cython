@@ -53,10 +53,14 @@ class CombinedCellsInfo(LexicalCellsInfo):
     _spec: dict
     _spec_ret_t: str
     usage: 'Optional[UsageVerdict]' = None  # set by usage.apply_verdicts
+    # True if some formula calls this cells with keyword arguments, which
+    # C-level (cpdef) calls do not support; set in cli.main_handler
+    called_with_kwargs: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         super().__init__(
-            lx_info.module, lx_info.cls, lx_info.name, lx_info.params
+            lx_info.module, lx_info.cls, lx_info.name, lx_info.params,
+            lx_info.params_with_defaults
         )
         self.parent = cls_info
         visitor = getattr(cls_info, "visitor", None)
