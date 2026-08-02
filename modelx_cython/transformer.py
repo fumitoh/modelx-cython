@@ -211,8 +211,8 @@ class PXDGenerator:
             if cells.is_special():
                 continue
 
-            if not cells.has_formula_def:
-                # no _f_ method exists
+            if not cells.has_formula_def or cells.formula_is_generator:
+                # no _f_ method exists, or it stays a plain Python method
                 continue
 
             if cells and cells.has_typeinfo():
@@ -239,6 +239,10 @@ class PXDGenerator:
         for cells in self.module.classes[cls_name].cells.values():
 
             if cells.is_special():
+                continue
+
+            if cells.body_has_closure:
+                # stays a plain Python method
                 continue
 
             if cells and cells.has_typeinfo():
@@ -517,6 +521,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 # _f_ methods
                 cells = cls_info.cells.get(meth_name[len(FORMULA_PREF):])
 
+                if cells.formula_is_generator:
+                    # yield is not supported inside cdef functions;
+                    # leave as a plain Python method
+                    return updated_node
+
                 decorators = [
                     cst.Decorator(
                         decorator=cst.Attribute(
@@ -584,6 +593,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             else:
                 # cells
                 cells: CombinedCellsInfo = cls_info.cells[meth_name]
+
+                if cells.body_has_closure:
+                    # closures cannot be compiled inside cpdef functions;
+                    # leave as a plain Python method
+                    return updated_node
 
                 decorators = [
                     cst.Decorator(
