@@ -280,6 +280,7 @@ class ClassInfo:
                         if v > d[k]:
                             d[k] = v
                             self._max_arg_cells[args][k] = lx_info.fqname
+                    self._cells_max_args[args] = tuple(d.values())
 
     def _init_spaces(self):
         self.spaces.extend(self.visitor.spaces.get(self.name, []))
