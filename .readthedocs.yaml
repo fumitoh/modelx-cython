@@ -1,0 +1,20 @@
+# Read the Docs configuration file.
+# See https://docs.readthedocs.io/en/stable/config-file/v2.html for details.
+
+version: 2
+
+build:
+  os: ubuntu-24.04
+  tools:
+    python: "3.12"
+
+sphinx:
+  configuration: doc/source/conf.py
+
+python:
+  install:
+    - requirements: doc/requirements.txt
+    # Install the package itself so autodoc can import modelx_cython
+    # together with its runtime dependencies (modelx, libcst, etc.).
+    - method: pip
+      path: .
