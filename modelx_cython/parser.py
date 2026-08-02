@@ -108,6 +108,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.classes = []
         self.spaces = {}  # Parent class name to list of child space names
         self.cimports = []
+        self.formula_defs = {}  # {class_name: set of cells names with _f_ defs}
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
 
@@ -181,7 +182,9 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
 
             if original_node.name.value[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
-                pass
+                name = original_node.name.value
+                self.formula_defs.setdefault(cls_name, set()).add(
+                    name[len(FORMULA_PREF):])
             elif original_node.name.value[: len(GLOBAL_PREF)] == GLOBAL_PREF:
                 # _mx_ methods
                 pass
