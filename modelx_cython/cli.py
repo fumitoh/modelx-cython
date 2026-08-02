@@ -119,7 +119,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             d = {}
         else:
             try:
-                d = ast.literal_eval(pathlib.Path(args.spec).read_text())
+                d = ast.literal_eval(pathlib.Path(args.spec).read_text(encoding="utf-8"))
             except FileNotFoundError as e:
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
@@ -141,7 +141,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             rel_src_path = rel_model_path / "/".join(subs)
             abs_pxd_path = model_path / "/".join(pxd_path)
             abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
-            source = abs_src_path.read_text()
+            source = abs_src_path.read_text(encoding="utf-8")
             visitor = ModuleVisitor(module=m, source=source)
             module_info = ModuleInfo(m, visitor, logger, spec)
             units.append(_TransUnit(
@@ -157,7 +157,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         traced = {u.fqname for u in units}
         for m, src_path in iter_module_files(model_path):
             if m not in traced:
-                visitor = ModuleVisitor(module=m, source=src_path.read_text())
+                visitor = ModuleVisitor(module=m, source=src_path.read_text(encoding="utf-8"))
                 pairs.append((visitor, ModuleInfo(m, visitor, logger, spec)))
         apply_verdicts(pairs, analyze_usage(pairs))
 
@@ -166,9 +166,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             trans = ModuleTransformer(u.source, u.module_info)
             pxd = PXDGenerator(u.module_info)
 
-            u.abs_src_path.write_text(trans.transformed.code)
-            u.abs_pxd_path.write_text(pxd.code)
-            u.abs_init_path.write_text("from . cimport _mx_classes")
+            u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
+            u.abs_pxd_path.write_text(pxd.code, encoding="utf-8")
+            u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
         create_setup(model_name, modules=modules, setup_file=setup_file)
@@ -317,7 +317,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_file.write_text(
         setup_script.format(
             model_name=model_name,
-            modules_str=modules_str))
+            modules_str=modules_str),
+        encoding="utf-8")
 
 
 def entry_point_main():
