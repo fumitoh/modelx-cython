@@ -95,6 +95,9 @@ class LexicalCellsInfo(LexicalBaseMemberInfo):
     params : Sequence[str]
         Parameter names as collected from the formula signature
         (positional parameters, excluding ``self``).
+    params_with_defaults : Sequence[str]
+        Names of the parameters in ``params`` that have default
+        values in the formula signature.
     """
 
     params: Sequence[str]
@@ -213,6 +216,21 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         assigned to ``self`` in its ``__init__``.
     cimports : list
         Always left empty by this visitor.
+    formula_defs : dict
+        Maps each space class name to the set of cells names for
+        which a ``_f_<name>`` formula method exists in the source.
+        Cells that modelx exports as uncached have no ``_f_`` method.
+    closure_funcs : dict
+        Maps each space class name to the set of cells method names
+        whose bodies contain a construct Cython compiles as a closure
+        (nested function, lambda, generator expression or yield).
+    generator_funcs : dict
+        Maps each space class name to the set of ``_f_`` method names
+        containing a ``yield``.
+    kwarg_called_names : set of str
+        Names of functions/methods called with keyword arguments
+        anywhere in the module, collected after the visit by
+        :meth:`_collect_kwarg_called_names`.
     wrapper : cst.metadata.MetadataWrapper
         Metadata wrapper around the parsed module.
     """
@@ -339,7 +357,12 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         """Record a :class:`LexicalCellsInfo` in ``self.cells_info``
         for each cells method of a space class, skipping ``_f_`` and
         ``_mx_`` prefixed methods and any method whose name starts
-        with ``__`` other than ``__call__``."""
+        with ``__`` other than ``__call__``.  Also records, for each
+        ``_f_`` method, the corresponding cells name in
+        ``formula_defs`` (and the ``_f_``-prefixed method name in
+        ``generator_funcs`` when it contains ``yield``), cells whose
+        bodies contain closures in ``closure_funcs``, and parameters
+        with default values in the cells' ``params_with_defaults``."""
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(

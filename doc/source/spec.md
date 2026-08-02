@@ -7,10 +7,10 @@ different file, or `--no-spec` to translate without one.
 
 ## File format
 
-The file must contain a single Python **dict literal**.  It is read with
-{py:func}`ast.literal_eval`, so only literals are allowed — no imports,
-expressions, or function calls.  Despite the `.py` extension, the file is
-data, not an executable module.
+The file must contain a single Python **dict literal**.  It is read as
+UTF-8 with {py:func}`ast.literal_eval`, so only literals are allowed —
+no imports, expressions, or function calls.  Despite the `.py`
+extension, the file is data, not an executable module.
 
 ```python
 {"spaces":
@@ -48,9 +48,9 @@ not listed use no spec.
 
 Declares the sizes of the per-cells cache arrays allocated for cells with
 integer parameters.  A cells whose parameters are all integers and whose
-values are numeric is backed by a fixed-size C array indexed by its
-parameters, so the translator must know each parameter's maximum size at
-translation time.
+values are numeric scalars (not arrays) is backed by a fixed-size C array
+indexed by its parameters, so the translator must know each parameter's
+maximum size at translation time.
 
 The value is a dict that maps a parameter name — or a tuple of parameter
 names for cells with multiple parameters — to the array size, or tuple of
@@ -77,7 +77,11 @@ declared range raises {py:exc}`IndexError`.
 Maps cells names to per-cells settings.  Currently one setting is defined:
 
 `return_type`
-: Overrides the return type inferred from the sample run.  One of:
+: Overrides the return type inferred from the sample run.  A
+  `return_type` setting takes effect only when the sample run collected
+  type information for the cells; for a cells the sample never called
+  it is ignored and the return type is `object` (only the
+  `"memoryview"` setting logs a warning when ignored).  One of:
 
   * `"bool"`, `"int"`, `"float"`, `"str"` — declare the corresponding
     scalar type (`int` and `float` map to C `long long` and `double`).

@@ -20,9 +20,10 @@ exported modelx model (a pure-Python package created by modelx's
 
 Unless ``--compile-only`` is given, :func:`main_handler` copies the
 model directory to ``<name>_cy``, runs the user's sample script under
-tracing to collect runtime type information, rewrites each traced model
-module with Cython pure-Python-mode annotations, generates matching
-``.pxd`` files, and writes a ``setup.py``.  Unless ``--translate-only`` is
+tracing to collect runtime type information, rewrites the model
+modules with Cython pure-Python-mode annotations (every space module,
+traced or not; ``_mx_model`` modules only when traced), generates
+matching ``.pxd`` files, and writes a ``setup.py``.  Unless ``--translate-only`` is
 given, it then runs ``setup.py build_ext --inplace`` to build the
 extension modules in place.
 """
@@ -218,15 +219,22 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
     missing spec file re-raises :class:`FileNotFoundError` with a hint
     to use ``--no-spec``).  Translation proper then runs in three
-    phases: (1) parse each traced module and build its
-    :class:`~modelx_cython.builder.ModuleInfo`; (2) statically analyze
-    how array-returning cells are consumed across all model modules --
-    including untraced ones -- and apply the verdicts so unsafe
-    memoryview return types fall back to ``object``; (3) rewrite each
-    traced module with
+    phases: (1) parse every model/space module and build its
+    :class:`~modelx_cython.builder.ModuleInfo` -- all space modules
+    are included even when the sample never exercised their cells
+    (other modules may reference their classes in ``.pxd``
+    declarations), while an ``_mx_model`` module is included only
+    when traced, since the transformer does not handle the model
+    class; (2) statically analyze how array-returning cells are
+    consumed and apply the verdicts so unsafe memoryview return types
+    fall back to ``object``, and mark cells that are called with
+    keyword arguments anywhere in the model so their public methods
+    stay plain Python methods (C-level calls are positional-only);
+    (3) rewrite each included module with
     :class:`~modelx_cython.transformer.ModuleTransformer`, write its
     ``.pxd`` and ``__init__.pxd`` files, and finally write the
-    generated ``setup.py`` via :func:`create_setup`.
+    generated ``setup.py`` via :func:`create_setup`.  Model sources
+    are read and written as UTF-8 regardless of locale.
 
     Unless ``args.translate_only`` is set, compiles the result with
     :func:`compile_main`.
