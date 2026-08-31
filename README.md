@@ -87,6 +87,10 @@ modelx-cython requires Python 3.7+.
 - libcst
 - MonkeyType
 
+modelx v0.33.0 and later declare `__slots__` on the exported Space classes
+by default. modelx-cython translates either style, but with modelx-cython
+v0.0.9 or older the model must be exported with `export(path, use_slots=False)`.
+
 ## License
 
 Copyright 2023-2025, Fumito Hamamura
