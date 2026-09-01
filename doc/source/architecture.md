@@ -39,7 +39,8 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    tracing finishes, {py:class}`~modelx_cython.tracer.MxCallTraceLogger`
    condenses the traces into per-cells type summaries
    ({py:class}`~modelx_cython.tracer.RuntimeCellsInfo`), reference-value
-   types, and space parameter types, and records the maximum observed
+   types read off the traced `self` from either its `__dict__` or its
+   slots, and space parameter types, and records the maximum observed
    value of every integer argument.
 
 3. **Parse** — every model module is parsed with
@@ -70,8 +71,9 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    rewrites each module's CST in Cython's pure Python mode:
    `@cython.cclass` on space classes, `@cython.ccall`/`@cython.cfunc` on
    cells and formula methods, typed parameters and return annotations,
-   class-level declarations for cache variables, refs and child spaces,
-   and C-array-backed caching bodies for cells with integer parameters.
+   class-level declarations for cache variables, refs and child spaces
+   in place of the `__slots__` the export declares, and C-array-backed
+   caching bodies for cells with integer parameters.
    In parallel, {py:class}`~modelx_cython.transformer.PXDGenerator` emits
    a `.pxd` declaration file per module so that modules can `cimport`
    each other.  Methods Cython cannot compile at the C level are left

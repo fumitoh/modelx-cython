@@ -23,9 +23,10 @@ combined lexical and runtime information in a
 * :class:`ModuleTransformer`, a libcst transformer that rewrites the
   module source into Cython pure-Python mode by injecting cimports,
   decorating space classes and methods, declaring cache variables and
-  typed attributes, replacing arrayable cells' method bodies with
-  C-array cache lookups, and prepending dict-cache initialization to
-  the other cells with parameters.
+  typed attributes in place of the exported ``__slots__``, replacing
+  arrayable cells' method bodies with C-array cache lookups, and
+  prepending dict-cache initialization to the other cells with
+  parameters.
 
 Methods that Cython cannot compile at the C level are left as plain
 Python methods and omitted from the ``.pxd`` declarations: public
@@ -680,6 +681,33 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 or original_node.body[0].targets[0].target.attr.value[: len(VAR_PREF)]
                 == VAR_PREF
             )
+        ):
+            return cst.RemoveFromParent()
+
+        return updated_node
+
+    @m.call_if_inside(m.ClassDef())
+    @m.leave(m.SimpleStatementLine())
+    def remove_slots_decl(self, original_node, updated_node):
+        """Remove the ``__slots__`` declaration from a space class body.
+
+        ``@_mx_cy.cclass`` stores the attributes of a space in C struct
+        fields, so a ``__slots__`` tuple carried over from the export
+        creates no storage.  Cython keeps it as a plain class
+        attribute, where it would name members that ``getattr`` cannot
+        reach and make :func:`copyreg._slotnames` report attributes the
+        object does not have.
+
+        The statement is removed only from the body of a top-level
+        space class, which is the same condition under which
+        :meth:`leave_ClassDef` attaches the decorator."""
+        if self.is_space_scope(original_node) and m.matches(
+            original_node,
+            m.SimpleStatementLine(
+                body=(
+                    m.Assign(targets=(m.AssignTarget(target=m.Name("__slots__")),)),
+                )
+            ),
         ):
             return cst.RemoveFromParent()
 

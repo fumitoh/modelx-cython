@@ -1,6 +1,7 @@
 import logging
 import sys
 import os
+import inspect
 import subprocess
 import pathlib
 import shutil
@@ -66,6 +67,12 @@ def generate_nomx(work_dir: pathlib.Path, model: str):
     del mx.get_models()[model]
 
 
+def export_has_use_slots():
+    """Whether modelx is new enough to export ``__slots__`` (v0.33.0)"""
+    import modelx as mx
+    return "use_slots" in inspect.signature(mx.core.model.Model.export).parameters
+
+
 def get_env(work_dir: pathlib.Path):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -96,6 +103,64 @@ def test_mx2cy_with_ref_space(sample_dir, target, model):
         [sys.executable, str(work_dir / "assert_cy.py")],
         env=env
     ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["ref_space", "RefSpace"]],
+                         indirect=["sample_dir"])
+def test_translate_is_same_for_both_export_styles(sample_dir, model):
+    """Refs are traced off __slots__ as well as off __dict__
+
+    modelx v0.33.0 declares __slots__ on the exported Space classes by
+    default, and a slotted instance has no __dict__ to read the refs
+    from.  Either export must translate to the same Cython source, and
+    the __slots__ tuple must not survive into the cdef class, where it
+    would name members that are no longer reachable by getattr.
+    """
+    import modelx as mx
+
+    if not export_has_use_slots():
+        pytest.skip("modelx export() has no use_slots parameter")
+
+    work_dir = sample_dir
+    env = get_env(work_dir)
+    exported = work_dir / (model + "_nomx")
+    translated = work_dir / (model + "_nomx_cy")
+    sources = {}
+
+    # Export twice from one model object rather than calling
+    # generate_nomx twice: modelx writes the id() of its IOSpec objects
+    # into the export, and a second read_model gives different ids.
+    model_obj = mx.read_model(work_dir / model)
+    try:
+        for use_slots in (True, False):
+            model_obj.export(exported, use_slots=use_slots)
+
+            assert ("__slots__" in (exported / "_mx_classes.py").read_text(
+                encoding="utf-8")) is use_slots
+
+            assert subprocess.run(
+                ["mx2cy", str(exported),
+                 "--spec", str(work_dir / "spec.py"),
+                 "--sample", str(work_dir / "sample.py"),
+                 "--translate-only"], env=env).returncode == 0
+
+            sources[use_slots] = {
+                path.relative_to(translated).as_posix():
+                    path.read_text(encoding="utf-8")
+                for path in sorted(translated.rglob("_mx_classes.py"))
+            }
+            shutil.rmtree(exported)
+            shutil.rmtree(translated)
+    finally:
+        del mx.get_models()[model]
+
+    assert not any("__slots__" in src for src in sources[True].values())
+    assert sources[True] == sources[False]
+
+    # the refs the exported __slots__ used to hide are declared instead
+    top = sources[True]["_mx_classes.py"]
+    assert "    bar: _c_Bar\n" in top
+    assert "    i: _mx_cy.longlong\n" in top
 
 
 @pytest.mark.parametrize("sample_dir, model", [["no_spec", "NoSpec"]],

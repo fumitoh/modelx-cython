@@ -42,7 +42,7 @@ import numbers
 import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
-from types import FrameType
+from types import FrameType, MemberDescriptorType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 import logging
 
@@ -379,6 +379,57 @@ def replace_first_name(dotted_name: str, name: str):
     return ".".join(names)
 
 
+def instance_attrs(obj: Any) -> Iterator[tuple]:
+    """Yield the instance attributes of ``obj`` as name-value pairs.
+
+    Covers both storage kinds an exported model can use.  modelx
+    declares ``__slots__`` on the generated space classes from v0.33.0
+    on, and a slotted instance has no ``__dict__``; earlier exports,
+    and exports made with ``use_slots=False``, store the attributes in
+    ``__dict__`` instead.  A class can also have both, so names already
+    yielded from ``__dict__`` are not yielded again.
+
+    The slots are read from the ``member_descriptor`` objects that the
+    class bodies define rather than from their ``__slots__`` tuples:
+    a private slot name is mangled with the declaring class, so the
+    tuple entry and the attribute name differ, while the descriptor is
+    always stored under the name the attribute is reachable by.
+
+    Parameters
+    ----------
+    obj : object
+        Instance whose attributes to yield.
+
+    Yields
+    ------
+    tuple of (str, object)
+        Attribute name and its value: first the ``__dict__`` entries in
+        insertion order, then the slots, class by class along the MRO.
+        CPython sorts a class's slot descriptors, so the slot names of
+        one class come out in ASCII order and not in the order
+        ``__slots__`` declares them.  A slot that has never been
+        assigned is skipped.  A name is yielded once, from the first
+        place it is found, which for a class carrying both a
+        ``__dict__`` entry and a slot of that name is the ``__dict__``
+        entry, whereas ``getattr`` would resolve to the slot.
+    """
+    seen = set()
+
+    for name, val in getattr(obj, "__dict__", {}).items():
+        seen.add(name)
+        yield name, val
+
+    for klass in type(obj).__mro__:
+        for name, member in vars(klass).items():
+            if not isinstance(member, MemberDescriptorType) or name in seen:
+                continue
+            seen.add(name)
+            try:
+                yield name, getattr(obj, name)
+            except AttributeError:  # slot never assigned
+                pass
+
+
 class MxCallTracer(CallTracer):
     """Add return_value to CallTrace
 
@@ -622,7 +673,7 @@ class MxCallTraceLogger(CallTraceLogger):
             tr0 = v[0]  # First trace
             if name_split[-1] == MX_ASSIGN_REFS:
                 # Extract refs
-                for name, val in tr0.arg_vals[MX_SELF].__dict__.items():
+                for name, val in instance_attrs(tr0.arg_vals[MX_SELF]):
                     if is_user_defined(name):
                         fqname = ".".join(name_split[:-1] + [name])
                         self.ref_info[fqname] = RuntimeRefInfo.init_mxobj(val, self.module)
