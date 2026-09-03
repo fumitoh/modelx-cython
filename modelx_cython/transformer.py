@@ -76,6 +76,7 @@ from modelx_cython.consts import (
     MX_SPACE_MOD,
     MX_ASSIGN_REFS,
     MX_COPY_REFS,
+    MX_LOCK,
     is_user_defined,
 )
 
@@ -661,7 +662,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     @m.leave(m.SimpleStatementLine())
     def remove_cache_assigns(self, original_node, updated_node):
         """Remove ``self._v_*`` and ``self._has_*`` assignments from
-        the ``__init__`` body of a space class."""
+        the ``__init__`` body of a space class.
+
+        The dict caches of a locked class are the exception: their
+        ``self._v_<name> = {}`` stays, so that the dict exists before any
+        thread calls the cells, instead of being created lazily on first
+        use by :meth:`_add_dict_assign`, which several threads could do
+        at once."""
         funcdef = self.get_parent(original_node, level=2)
         clsdef = self.get_parent(funcdef, level=2)
         if (
@@ -682,6 +689,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 == VAR_PREF
             )
         ):
+            attr = original_node.body[0].targets[0].target.attr.value
+            cls_info = self.module.classes.get(clsdef.name.value)
+            if (cls_info is not None and cls_info.is_locked
+                    and attr[: len(VAR_PREF)] == VAR_PREF):
+                cells = cls_info.cells.get(attr[len(VAR_PREF):])
+                if cells is not None and cells.uses_dict_cache:
+                    return updated_node
             return cst.RemoveFromParent()
 
         return updated_node
@@ -776,7 +790,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         called with keyword arguments get type annotations but no
         ``@_mx_cy.ccall`` decorator.  Uncached cells (no ``_f_``
         method) get the decorator and annotations but keep their
-        original body, since it is the formula itself."""
+        original body, since it is the formula itself.
+
+        The cells of a locked class (see
+        :attr:`~modelx_cython.builder.CombinedCellsInfo.is_locked`)
+        keep the double-checked locking of the export: the ``_has_``
+        flags are C fields here, so their bodies are regenerated with
+        the acquire/release accessors of ``_mx_sys.pxd`` on the flag,
+        and the model lock on the miss path (see :meth:`_locked_body`).
+        Dict-cached cells keep the exported body, whose dict operations
+        need no ordering, without the lazy dict initialization."""
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
@@ -918,18 +941,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         idx_range = " and ".join(
                             [f"(0 <= {p} < {i})" for p, i in zip(args, size)])
 
-                        if_stmt = textwrap.dedent(f"""\
-                        if {idx_range}:
-                            if {has_expr}:
-                                return {v_expr}
-                            else:
-                                val = {f_expr}
-                                {v_expr} = val
-                                {has_expr} = True
-                                return val
+                        if cells.is_locked:
+                            cache_body = self._locked_body(
+                                has_expr, v_expr, f_expr, indent=4)
                         else:
-                            raise IndexError("array index out of range")
-                        """)
+                            cache_body = textwrap.dedent(f"""\
+                                if {has_expr}:
+                                    return {v_expr}
+                                else:
+                                    val = {f_expr}
+                                    {v_expr} = val
+                                    {has_expr} = True
+                                    return val
+                                """)
+                        if_stmt = (
+                            f"if {idx_range}:\n"
+                            + textwrap.indent(cache_body, " " * 4)
+                            + "else:\n"
+                            + '    raise IndexError("array index out of range")\n')
                         if_node = cst.parse_statement(
                             if_stmt, config=self._module_node.config_for_parsing
                         )
@@ -944,13 +973,34 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body=indented_block,
                         )
                     else:
+                        if cells.is_locked:
+                            # the exported body is already double-checked
+                            # and the dict is created in __init__
+                            body = updated_node.body
+                        else:
+                            body = self._add_dict_assign(meth_name, updated_node)
                         return updated_node.with_changes(
                             decorators=decorators,
                             params=parameters,
                             returns=returns,
-                            body=self._add_dict_assign(meth_name, updated_node)
+                            body=body
                         )
                 else:   # No type info, no arg
+                    if cells.is_locked:
+                        stmts = cst.parse_module(
+                            self._locked_body(
+                                f"{MX_SELF}.{HAS_PREF}{meth_name}",
+                                f"{MX_SELF}.{VAR_PREF}{meth_name}",
+                                f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"),
+                            config=self._module_node.config_for_parsing
+                        ).body
+                        return updated_node.with_changes(
+                            decorators=decorators,
+                            returns=returns,
+                            body=cst.ensure_type(
+                                updated_node.body, cst.IndentedBlock
+                            ).with_changes(body=tuple(stmts))
+                        )
                     return updated_node.with_changes(
                         decorators=decorators,
                         returns=returns
@@ -958,6 +1008,36 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
 
 
         return updated_node
+
+    @staticmethod
+    def _locked_body(has_expr: str, v_expr: str, f_expr: str, indent=0) -> str:
+        """The body of a cached cells of a locked class.
+
+        The same double-checked locking as the export: the flag is read
+        without the lock, and on a miss the model lock is taken, the flag
+        checked again and the formula run. The flag is a C field, so it
+        is read through ``_mx_load_flag`` (an acquire load on a
+        free-threaded build) and written through ``_mx_store_flag`` (a
+        release store) after the value, which is what lets a reader that
+        sees the flag see the value as well. The re-check under the lock
+        needs no ordering of its own.
+
+        Returns the statements as source, indented by ``indent`` spaces.
+        """
+        load = f"{MX_SYS_MOD}._mx_load_flag({CY_MOD}.address({has_expr}))"
+        store = f"{MX_SYS_MOD}._mx_store_flag({CY_MOD}.address({has_expr}), True)"
+        body = textwrap.dedent(f"""\
+            if {load}:
+                return {v_expr}
+            with {MX_SELF}.{MX_LOCK}:
+                if {has_expr}:
+                    return {v_expr}
+                val = {f_expr}
+                {v_expr} = val
+                {store}
+                return val
+            """)
+        return textwrap.indent(body, " " * indent)
 
     def _add_dict_assign(self, meth_name: str, updated_node) -> cst.IndentedBlock:
         """Add dict assignment in method

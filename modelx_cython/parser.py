@@ -46,6 +46,7 @@ from modelx_cython.consts import (
     SPACE_PREF,
     MX_SELF,
     MX_ASSIGN_REFS,
+    MX_LOCK,
     is_user_defined,
 )
 
@@ -227,6 +228,12 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     generator_funcs : dict
         Maps each space class name to the set of ``_f_`` method names
         containing a ``yield``.
+    locked_classes : set of str
+        Names of the classes whose ``__init__`` assigns ``self._mx_lock``:
+        the spaces that modelx exported with ``locked_spaces``, whose
+        cells run their formulas under the model lock.  The generated
+        model class assigns the lock too, so it is listed when its module
+        is parsed.
     kwarg_called_names : set of str
         Names of functions/methods called with keyword arguments
         anywhere in the module, collected after the visit by
@@ -250,6 +257,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.formula_defs = {}  # {class_name: set of cells names with _f_ defs}
         self.closure_funcs = {}  # {class_name: set of method names containing closures}
         self.generator_funcs = {}  # {class_name: set of method names containing yield}
+        self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
         self.kwarg_called_names = self._collect_kwarg_called_names()
@@ -299,7 +307,8 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     def collect_space_info(self, original_node):
         """Record child spaces from ``self.<name>`` assignments in a
         space class's ``__init__``, for names without a leading
-        underscore, into ``self.spaces``."""
+        underscore, into ``self.spaces``; and the class into
+        ``self.locked_classes`` when it assigns ``self._mx_lock``."""
         if self.is_space_scope(original_node, level=2):
             # SimpleStatement in IndentedBlock in FunctionDef in IndentedBlock in ClassDef
             node = original_node
@@ -313,6 +322,10 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
             try:
                 target = cst.ensure_type(node.body[0], cst.Assign).targets[0].target
             except Exception:
+                return
+
+            if target.value.value == MX_SELF and target.attr.value == MX_LOCK:
+                self.locked_classes.add(cls_name)
                 return
 
             # Assuming all member assignments in __init__ to names without prefix "_" are child spaces

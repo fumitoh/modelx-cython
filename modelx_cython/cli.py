@@ -313,6 +313,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             source = abs_src_path.read_text(encoding="utf-8")
             visitor = ModuleVisitor(module=m, source=source)
             module_info = ModuleInfo(m, visitor, logger, spec)
+            for cls in sorted(visitor.locked_classes):
+                if cls in module_info.classes:
+                    _logger.info(
+                        f"{m}.{cls} is locked: its cells run their formulas "
+                        "under the model lock")
             units.append(_TransUnit(
                 m, source, visitor, module_info,
                 abs_src_path, rel_src_path, abs_pxd_path, abs_init_path))
@@ -536,8 +541,12 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
 
     The generated script calls :func:`setuptools.setup` with
     ``name=model_name`` and ``ext_modules`` produced by
-    ``cythonize(..., annotate=True)`` over the given module paths.
-    Any existing file at ``setup_file`` is overwritten.
+    ``cythonize(..., annotate=True)`` over the given module paths, with
+    the ``freethreading_compatible`` directive set so that importing the
+    compiled model on a free-threaded build of Python does not re-enable
+    the GIL (the directive needs Cython 3.1 or later and does nothing on
+    a build with the GIL).  Any existing file at ``setup_file`` is
+    overwritten.
 
     Parameters
     ----------
@@ -566,7 +575,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
         ext_modules=cythonize([
     {modules_str}
             ],
-            annotate=True
+            annotate=True,
+            compiler_directives={{"freethreading_compatible": True}}
         )
     )
     """)

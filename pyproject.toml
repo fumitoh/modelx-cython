@@ -12,14 +12,14 @@ keywords = [
     "actuary",
 ]
 dynamic = ["version"]
-requires-python = ">=3.7"
+requires-python = ">=3.8"
 authors = [
   { name = "Fumito Hamamura", email = "fumito.ham@gmail.com" },
 ]
 dependencies = [
     "modelx",
     "libcst",
-    "Cython",
+    "Cython>=3.2",
     "setuptools",
     "MonkeyType",
     "numpy",
@@ -50,11 +50,13 @@ classifiers=[
     # Specify the Python versions you support here. In particular, ensure
     # that you indicate whether you support Python 2, Python 3 or both.
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11"
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14"
 ]
 
 
