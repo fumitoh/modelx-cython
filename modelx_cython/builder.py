@@ -243,6 +243,29 @@ class CombinedCellsInfo(LexicalCellsInfo):
         return bool(self.params)
 
     @property
+    def is_locked(self):
+        """Whether the cells runs its formula under the model lock.
+
+        True for a cached cells of a space that modelx exported with
+        ``locked_spaces`` (see :attr:`ClassInfo.is_locked`).  Uncached
+        cells have nothing to protect, and special methods such as
+        ``__call__`` keep the exported body, so both are False.
+        """
+        return (self.parent is not None and self.parent.is_locked
+                and self.has_formula_def and not self.is_special())
+
+    @property
+    def uses_dict_cache(self):
+        """Whether the cells' values are cached in a Python dict.
+
+        True for a cached cells with parameters that is not arrayable,
+        which is every cells with parameters that has no type
+        information.  Its ``_v_`` attribute is a ``cdef dict``.
+        """
+        return (self.has_formula_def and self.has_args()
+                and not (self.has_typeinfo() and self.is_arrayable()))
+
+    @property
     def ret_ndim(self) -> int:
         """Number of dimensions of the traced return value.
 
@@ -638,6 +661,16 @@ class ClassInfo:
         ``<module fqname>.<class name>``.
         """
         return self.module.fqname + "." + self.name
+
+    @cached_property
+    def is_locked(self):
+        """Whether the space was exported with ``locked_spaces``.
+
+        Read from the source: a locked space class assigns
+        ``self._mx_lock`` in its ``__init__``
+        (:attr:`~modelx_cython.parser.ModuleVisitor.locked_classes`).
+        """
+        return self.name in self.visitor.locked_classes
 
     @cached_property
     def cells_arg_sizes(self) -> Mapping[Tuple[str], Tuple[int]]:

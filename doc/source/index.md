@@ -32,6 +32,7 @@ installation
 tutorial
 cli
 spec
+freethreading
 implementation
 ```
 

@@ -19,7 +19,7 @@ executable script.
 
 ## Requirements
 
-modelx-cython requires Python 3.7 or newer, and depends on the following
+modelx-cython requires Python 3.8 or newer, and depends on the following
 packages, which are installed automatically when you install modelx-cython
 with `pip` or `conda`:
 
@@ -27,9 +27,12 @@ with `pip` or `conda`:
   models to pure-Python packages.  From v0.33.0 modelx declares
   `__slots__` on the exported Space classes by default; modelx-cython
   translates either style, but with modelx-cython v0.0.9 or older the
-  model must be exported with `export(path, use_slots=False)`.
-* [Cython](https://cython.org/) v3.0.0+ — for compiling the translated
-  models
+  model must be exported with `export(path, use_slots=False)`.  A model
+  exported with `locked_spaces` (modelx v0.33.0+, see
+  {doc}`freethreading`) needs modelx-cython v0.1.0 or later.
+* [Cython](https://cython.org/) v3.2.0+ — for compiling the translated
+  models; the generated build script sets the `freethreading_compatible`
+  directive, which older Cython versions do not know
 * [setuptools](https://setuptools.pypa.io/) — for building the extension
   modules
 * [libcst](https://libcst.readthedocs.io/) — for parsing and transforming

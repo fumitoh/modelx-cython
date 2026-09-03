@@ -58,6 +58,10 @@ MX_ASSIGN_REFS : str
 MX_COPY_REFS : str
     ``"_mx_copy_refs"``.  Name of the generated method copying refs
     from a base space.
+MX_LOCK : str
+    ``"_mx_lock"``.  Attribute holding the ``threading.RLock`` shared
+    by the locked spaces of a model.  Its assignment in a space's
+    ``__init__`` marks the space class as locked.
 BASE_MODEL : str
     ``"BaseModel"``.  Name of the model base class defined in
     ``_mx_sys``.
@@ -91,6 +95,7 @@ MX_SYS_MOD = FILE_PREF + "sys"
 
 MX_ASSIGN_REFS = GLOBAL_PREF + "assign_refs"
 MX_COPY_REFS = GLOBAL_PREF + "copy_refs"
+MX_LOCK = GLOBAL_PREF + "lock"
 BASE_MODEL = "BaseModel"
 SPACE_PARAMS = VAR_PREF + "space_params"
 CY_MOD = GLOBAL_PREF + "cy"

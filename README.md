@@ -79,10 +79,10 @@ conda install -c conda-forge modelx-cython
 
 ## Requirements
 
-modelx-cython requires Python 3.7+.
+modelx-cython requires Python 3.8+.
 
 - modelx v0.23.0+
-- Cython v3.0.0+
+- Cython v3.2.0+
 - setuptools
 - libcst
 - MonkeyType
@@ -90,6 +90,12 @@ modelx-cython requires Python 3.7+.
 modelx v0.33.0 and later declare `__slots__` on the exported Space classes
 by default. modelx-cython translates either style, but with modelx-cython
 v0.0.9 or older the model must be exported with `export(path, use_slots=False)`.
+
+modelx v0.33.0 and later can also export a model with `locked_spaces`, so that
+the exported model and its compiled version can be used from several threads
+on a free-threaded build of Python (3.13t, 3.14t). modelx-cython v0.1.0 or
+later is needed to compile such an export; the compiled package declares
+itself free-threading compatible, so importing it does not re-enable the GIL.
 
 ## License
 

@@ -33,7 +33,9 @@ place.  The original package is never modified.
 : Path to a sample file to run for collecting type information
   (default: `sample.py`).  The script is executed as `__main__` with the
   parent directory of `model_path` prepended to `sys.path`, while every
-  cells call in the model is traced.  See {doc}`tutorial`.
+  cells call in the model is traced.  The script must run the model in a
+  single thread: the tracer is installed for the thread that runs the
+  script only.  See {doc}`tutorial`.
 
 `--spec SPEC`
 : Path to a spec file for setting parameters (default: `spec.py`).  The
@@ -87,7 +89,10 @@ status of the `setup.py build_ext --inplace` subprocess is returned.
 
 `setup.py`
 : Cython build script (generated; the path can be changed with
-  `--setup`).
+  `--setup`).  It sets the Cython directive `freethreading_compatible`,
+  so that importing the compiled package on a free-threaded build of
+  Python does not re-enable the GIL (see {doc}`freethreading`); the
+  directive does nothing on a build with the GIL.
 
 `<model>_cy/`
 : The translated and compiled package (output).

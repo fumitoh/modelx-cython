@@ -30,7 +30,7 @@ def test_mx2cy_with_lifelib(sample_dir, target, model):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
          "--spec", str(work_dir / "spec.py"),
          "--sample", str(work_dir / "sample.py")]
 
@@ -73,6 +73,13 @@ def export_has_use_slots():
     return "use_slots" in inspect.signature(mx.core.model.Model.export).parameters
 
 
+def export_has_locked_spaces():
+    """Whether modelx is new enough to export locked Spaces (v0.33.0)"""
+    import modelx as mx
+    return "locked_spaces" in inspect.signature(
+        mx.core.model.Model.export).parameters
+
+
 def get_env(work_dir: pathlib.Path):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(work_dir) + os.pathsep + env.get("PYTHONPATH", "")
@@ -89,7 +96,7 @@ def test_mx2cy_with_ref_space(sample_dir, target, model):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--spec", str(work_dir / "spec.py"),
             "--sample", str(work_dir / "sample.py")]
 
@@ -139,7 +146,7 @@ def test_translate_is_same_for_both_export_styles(sample_dir, model):
                 encoding="utf-8")) is use_slots
 
             assert subprocess.run(
-                ["mx2cy", str(exported),
+                [sys.executable, "-m", "modelx_cython", str(exported),
                  "--spec", str(work_dir / "spec.py"),
                  "--sample", str(work_dir / "sample.py"),
                  "--translate-only"], env=env).returncode == 0
@@ -163,6 +170,82 @@ def test_translate_is_same_for_both_export_styles(sample_dir, model):
     assert "    i: _mx_cy.longlong\n" in top
 
 
+@pytest.mark.parametrize("sample_dir", ["locked_spaces"], indirect=True)
+def test_locked_spaces(sample_dir):
+    """A model exported with ``locked_spaces`` compiles and runs from threads.
+
+    The locked classes keep the double-checked locking of the export: the
+    ``_has_`` flags go through the acquire/release accessors of
+    ``_mx_sys.pxd``, dict caches are created in ``__init__``, and the
+    unlocked export of the same model translates without any of it.
+    """
+    if not export_has_locked_spaces():
+        pytest.skip("modelx export() has no locked_spaces parameter")
+
+    work_dir = sample_dir
+    env = get_env(work_dir)
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "build_model.py")], env=env
+    ).returncode == 0
+
+    for pkg, sample in (("LockedSpaces_nomx", "sample.py"),
+                        ("LockedSpacesU_nomx", "sample_unlocked.py")):
+        assert subprocess.run(
+            [sys.executable, "-m", "modelx_cython", str(work_dir / pkg),
+             "--spec", str(work_dir / "spec.py"),
+             "--sample", str(work_dir / sample),
+             "--translate-only"], env=env).returncode == 0
+
+    locked = work_dir / "LockedSpaces_nomx_cy"
+    unlocked = work_dir / "LockedSpacesU_nomx_cy"
+
+    top = (locked / "_mx_classes.py").read_text(encoding="utf-8")
+    data = top.split("class _c_Data")[1].split("\nclass ")[0]
+    proj = top.split("class _c_Projection")[1].split("\nclass ")[0]
+    table = top.split("class _c_Table")[1].split("\nclass ")[0]
+    child = (locked / "_m_Table" / "_mx_classes.py").read_text(encoding="utf-8")
+
+    # locked classes: atomic flag accessors on the fast path, the model
+    # lock on the miss path, and the value stored before the flag
+    for src, name in [(data, "scale"), (data, "table_arr"),
+                      (table, "key_weight"), (child, "child_val")]:
+        body = src.split(f"def {name}(self)")[1].split("\n    def ")[0]
+        assert f"_mx_sys._mx_load_flag(_mx_cy.address(self._has_{name}))" in body
+        assert "with self._mx_lock:" in body
+        assert body.index(f"self._v_{name} = val") < body.index(
+            f"_mx_sys._mx_store_flag(_mx_cy.address(self._has_{name}), True)")
+    for src, name in [(data, "rate"), (table, "rec")]:
+        body = src.split(f"def {name}(self")[1].split("\n    def ")[0]
+        assert f"_mx_load_flag(_mx_cy.address(self._has_{name}[" in body
+        assert "with self._mx_lock:" in body
+    # a dict-cached cells keeps the exported body and its dict in __init__
+    assert "self._v_lookup = {}" in data.split("def _mx_assign_refs")[0]
+    assert "if self._v_lookup is None" not in data
+    assert "if name in self._v_lookup:" in data
+    assert "self._mx_lock = self._model._mx_lock" in data
+    # __call__ keeps the exported body
+    assert "_mx_root = self._mx_itemspaces.get(_mx_key)" in table
+
+    # the per-thread Space is untouched
+    assert "_mx_lock" not in proj
+    assert "if self._v_pv is None:" not in proj      # arrayable, no dict
+    # the unlocked export carries no lock at all
+    for path in unlocked.rglob("*.py*"):
+        if path.name != "_mx_sys.pxd":
+            assert "_mx_lock" not in path.read_text(encoding="utf-8"), path
+    assert 'compiler_directives={"freethreading_compatible": True}' in (
+        work_dir / "setup.py").read_text(encoding="utf-8")
+
+    # compile the locked model and run it from eight threads
+    assert subprocess.run(
+        [sys.executable, "-m", "modelx_cython", str(work_dir / "LockedSpaces_nomx"),
+         "--spec", str(work_dir / "spec.py"),
+         "--sample", str(work_dir / "sample.py")], env=env).returncode == 0
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")], env=env
+    ).returncode == 0
+
+
 @pytest.mark.parametrize("sample_dir, model", [["no_spec", "NoSpec"]],
                          indirect=["sample_dir"])
 @pytest.mark.parametrize("target", ["mx2cy", pytest.param("main", marks=pytest.mark.skip(reason="Skipping 'main' target"))])
@@ -172,7 +255,7 @@ def test_no_spec(sample_dir, target, model, no_spec):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py")]
 
     if no_spec:
@@ -202,7 +285,7 @@ def test_varying_arg_types(sample_dir, model, caplog):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
             "--no-spec"]
 
@@ -221,7 +304,7 @@ def test_varying_integral_arg_types(sample_dir, model):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
             "--no-spec"]
 
@@ -242,7 +325,7 @@ def test_deep_recursion_and_index_range(sample_dir, model, spec):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py")]
 
     if spec:
@@ -266,7 +349,7 @@ def test_various_types(sample_dir, model, sample, assertion):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / sample),
             "--no-spec"]
 
@@ -286,7 +369,7 @@ def test_array_usage(sample_dir, model):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
             "--no-spec"]
 
@@ -315,7 +398,7 @@ def test_array_usage(sample_dir, model):
     ).returncode == 0
 
     # spec return_type "memoryview" overrides the classifier
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
             "--spec", str(work_dir / "spec_force_mv.py"),
             "--translate-only"]
@@ -325,7 +408,7 @@ def test_array_usage(sample_dir, model):
     assert "cdef const double[:] _v_arr_whole\n" in pxd
 
     # "memoryview" on a cells not returning a real-valued array is an error
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
             "--spec", str(work_dir / "spec_bad_mv.py"),
             "--translate-only"]
@@ -344,7 +427,7 @@ def test_array_size(sample_dir, model, spec):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             # "--sample", str(work_dir / "sample.py"),
             "--log-level", "INFO"]
     argv += spec
@@ -372,7 +455,7 @@ def test_varying_arg_types(sample_dir, model, spec):
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
-    argv = ["mx2cy", str(work_dir / (model + "_nomx")),
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
             "--sample", str(work_dir / "sample.py"),
             "--spec", str(work_dir / spec)]
 
