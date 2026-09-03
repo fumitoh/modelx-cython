@@ -101,6 +101,7 @@ defined in {py:mod}`modelx_cython.consts`:
 | `_f_`         | Formula method backing a cells (`_f_pv_net_cf`) |
 | `_v_`         | Cache variable holding computed cells values |
 | `_has_`       | Flag variable marking which cache entries are filled |
+| `_mx_lock`    | The `threading.RLock` shared by the locked spaces of a model; its assignment in `__init__` marks a space class as locked |
 
 Names without a leading underscore are user-defined members: cells, refs,
 and child spaces.
@@ -147,3 +148,49 @@ cells fall back to a per-cells Python dict keyed by the argument tuple.
 Cells that modelx exports as *uncached* have no `_f_` formula method —
 their public method is the formula itself — and get no cache storage
 in the compiled model either.
+
+### Locked spaces
+
+A space that modelx exported with `locked_spaces` (see
+{doc}`freethreading`) assigns `self._mx_lock = self._model._mx_lock` in
+its `__init__`; {py:class}`~modelx_cython.parser.ModuleVisitor` records
+such classes in `locked_classes`, and
+{py:attr}`ClassInfo.is_locked <modelx_cython.builder.ClassInfo.is_locked>`
+and
+{py:attr}`CombinedCellsInfo.is_locked <modelx_cython.builder.CombinedCellsInfo.is_locked>`
+expose it.  The lock itself is declared once, as
+`cdef public object _mx_lock` on `BaseParent` in `_mx_sys.pxd`, so that
+the model class (which stays a plain Python subclass of the compiled
+`BaseModel`) can assign it and every compiled space reads it as a C field.
+
+The cells of a locked class keep the double-checked locking of the
+export.  For a cells cached in a typed variable or a C array the
+transformer regenerates the body, because the `_has_` flag is a C field
+whose plain load and store carry no ordering:
+
+```python
+@_mx_cy.ccall
+def scale(self) -> _mx_cy.double:
+    if _mx_sys._mx_load_flag(_mx_cy.address(self._has_scale)):
+        return self._v_scale
+    with self._mx_lock:
+        if self._has_scale:
+            return self._v_scale
+        val = self._f_scale()
+        self._v_scale = val
+        _mx_sys._mx_store_flag(_mx_cy.address(self._has_scale), True)
+        return val
+```
+
+`_mx_load_flag` and `_mx_store_flag` are declared in `_mx_sys.pxd` by a
+verbatim C block: on a free-threaded build they are
+`_Py_atomic_load_int_acquire` and `_Py_atomic_store_int_release` from
+CPython's `pyatomic.h`, elsewhere plain accesses.  The value is stored
+before the flag, so a reader that sees the flag without the lock sees the
+value.  A dict-cached cells keeps the exported body, whose dict operations
+CPython synchronizes on its own, and `remove_cache_assigns` leaves its
+`self._v_<name> = {}` in `__init__` instead of the lazy initialization
+that unlocked classes get in `_add_dict_assign`.  `__call__` keeps the
+exported body as well.  The generated `setup.py` always sets the Cython
+directive `freethreading_compatible`, so that importing a compiled model
+on a free-threaded build does not re-enable the GIL.
