@@ -450,8 +450,14 @@ def test_array_size(sample_dir, model, spec):
 @pytest.mark.parametrize("sample_dir, model", [["size_spec_change", "SizeSpecChange"]],
                          indirect=["sample_dir"])
 @pytest.mark.parametrize("spec", ["spec_old.py", "spec_new.py"])
-def test_varying_arg_types(sample_dir, model, spec):
-    """int and float numbers are given to the same arg"""
+def test_size_spec_change(sample_dir, model, spec):
+    """Array sizes follow the parameter sizes given in the spec file
+
+    ``spec_old.py`` uses the deprecated ``cells_params``/``size`` keys and
+    ``spec_new.py`` the current ``cells_param_size`` key, and the two specify
+    different sizes. Both forms are honoured, so only the larger sizes in
+    ``spec_new.py`` admit the parameter values in ``assert_cy_new.py``.
+    """
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
 
