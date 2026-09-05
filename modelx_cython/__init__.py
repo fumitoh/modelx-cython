@@ -31,5 +31,5 @@ __version__ : str
     ``version_info``.
 """
 
-version_info = (0, 0, 9)
+version_info = (0, 1, 0)
 __version__ = ".".join([str(x) for x in version_info])
