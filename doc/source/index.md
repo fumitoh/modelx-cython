@@ -34,6 +34,7 @@ cli
 spec
 freethreading
 implementation
+releases
 ```
 
 ## See also

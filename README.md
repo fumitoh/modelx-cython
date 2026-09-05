@@ -99,7 +99,7 @@ itself free-threading compatible, so importing it does not re-enable the GIL.
 
 ## License
 
-Copyright 2023-2025, Fumito Hamamura
+Copyright 2023-2026, Fumito Hamamura
 
 modelx is free software; you can redistribute it and/or
 modify it under the terms of
