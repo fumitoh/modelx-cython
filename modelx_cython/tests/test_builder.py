@@ -5,6 +5,7 @@ import pytest
 
 from modelx_cython.builder import (
     CombinedCellsInfo,
+    CombinedRefInfo,
     MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS,
 )
 from modelx_cython.parser import LexicalCellsInfo
@@ -87,3 +88,54 @@ def test_spec_memoryview_without_typeinfo_ignored(caplog):
     cells = CombinedCellsInfo(None, make_lx(), None,
                               {"return_type": "memoryview"})
     assert cells.get_rettype_expr(c_style=True) == "object"
+
+
+# --------------------------------------------------------------------
+# CombinedRefInfo
+
+
+def make_ref(module, mx_class, cls="_c_Foo", name="bar", type_=object):
+    rt = types.SimpleNamespace(type_=type_, mx_class=mx_class)
+    return CombinedRefInfo(module, cls, name, rt_info=rt)
+
+
+def test_ref_class_in_own_module_is_relative():
+    ref = make_ref("Pkg._mx_classes", "Pkg._mx_classes._c_Bar")
+    assert ref.is_relative
+    assert ref.decl_type_expr == "_c_Bar"
+    assert ref.get_type_expr(c_style=True) == "_c_Bar"
+
+
+def test_ref_class_in_other_module_is_absolute():
+    ref = make_ref("Pkg._mx_classes", "Pkg._m_Bar._mx_classes._c_Qux")
+    assert not ref.is_relative
+    assert ref.decl_type_expr == "Pkg._m_Bar._mx_classes._c_Qux"
+
+
+def test_ref_class_in_prefix_sharing_module_is_absolute():
+    """The relative test must hold on a dotted boundary.
+
+    A module whose name merely extends this module's name is a
+    different module, so a class defined there is declared by its full
+    path.  Comparing the raw prefix instead marks it relative and cuts
+    the wrong number of leading characters off, leaving the truncated
+    ``ar._mx_classes._c_Qux`` in the generated declaration.
+    """
+    ref = make_ref("Pkg._m_Foo", "Pkg._m_FooBar._mx_classes._c_Qux")
+    assert not ref.is_relative
+    assert ref.decl_type_expr == "Pkg._m_FooBar._mx_classes._c_Qux"
+
+
+def test_ref_holding_no_space_has_no_decl_type():
+    ref = make_ref("Pkg._mx_classes", "", type_=int)
+    assert not ref.is_relative
+    assert ref.decl_type_expr == ""
+    assert ref.get_type_expr(c_style=True) == "long long"
+
+
+def test_ref_never_sampled_declares_object():
+    ref = CombinedRefInfo("Pkg._mx_classes", "_c_Foo", "bar", rt_info=None)
+    assert ref.type_ is None
+    assert ref.mx_class == ""
+    assert not ref.is_relative
+    assert ref.get_type_expr(c_style=True) == "object"
