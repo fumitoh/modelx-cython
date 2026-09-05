@@ -336,10 +336,14 @@ class RuntimeValueInfo:
         -------
         RuntimeValueInfo
             With ``mx_class`` set to the value's fully qualified class
-            name if the class's module name starts with ``module``,
+            name if the class is defined in the ``module`` package,
             otherwise with ``mx_class`` left empty.
         """
-        if (value.__class__.__module__)[:len(module)] == module:
+        # Compare the top-level component, not a raw prefix: an
+        # unrelated package whose name merely extends the model's
+        # (e.g. "Model_nomx_cy" against "Model_nomx") would otherwise
+        # pass for a model package.
+        if value.__class__.__module__.split(".")[0] == module:
             return cls(value, mx_class=value.__class__.__module__ + "." + value.__class__.__qualname__)
         else:
             return cls(value)

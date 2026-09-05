@@ -6,6 +6,7 @@ import pytest
 from modelx_cython.tracer import (
     ReturnTypeInfo,
     RuntimeCellsInfo,
+    RuntimeValueInfo,
     instance_attrs,
 )
 from modelx_cython.monkeytype_tracing import CallTrace
@@ -150,3 +151,47 @@ def test_instance_attrs_yields_a_shadowed_slot_once():
     """A slot redeclared in a subclass shadows the base one, as getattr
     resolves it"""
     assert list(instance_attrs(ShadowingSlot())) == [("a", 99), ("b", 2)]
+
+
+# --------------------------------------------------------------------
+# RuntimeValueInfo.init_mxobj
+
+
+MODEL_PKG = "Model_nomx"
+
+
+def make_value(module, qualname="_c_Foo"):
+    """An instance of a class that reports ``module`` as its module"""
+    cls = type(qualname, (), {"__module__": module})
+    return cls()
+
+
+def test_mxobj_in_the_model_root_module_is_detected():
+    info = RuntimeValueInfo.init_mxobj(
+        make_value("Model_nomx._mx_classes"), MODEL_PKG)
+    assert info.mx_class == "Model_nomx._mx_classes._c_Foo"
+
+
+def test_mxobj_in_a_model_submodule_is_detected():
+    info = RuntimeValueInfo.init_mxobj(
+        make_value("Model_nomx._m_Bar._mx_classes"), MODEL_PKG)
+    assert info.mx_class == "Model_nomx._m_Bar._mx_classes._c_Foo"
+
+
+def test_mxobj_in_a_prefix_sharing_package_is_not_detected():
+    """Only the top-level package name decides, not a raw prefix.
+
+    A package whose name merely extends the model package's name is a
+    different package.  Comparing the raw prefix records its class as a
+    model space class, and the ref is then declared with, and its
+    package cimported by, a .pxd that the model does not build.
+    """
+    info = RuntimeValueInfo.init_mxobj(
+        make_value("Model_nomx_cy._mx_classes"), MODEL_PKG)
+    assert info.mx_class == ""
+
+
+def test_mxobj_outside_the_model_package_is_not_detected():
+    info = RuntimeValueInfo.init_mxobj(1, MODEL_PKG)
+    assert info.mx_class == ""
+    assert info.type_ is int
