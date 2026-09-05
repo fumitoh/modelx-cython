@@ -1,0 +1,139 @@
+# This workflow will install Python dependencies and run the tests with a
+# variety of Python versions
+# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
+
+name: Python package
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  unit:
+    # These tests neither translate nor compile a model, so they cost seconds
+    # and run on the whole matrix.
+    # macos-latest is arm64, where the newest 3.9 asset in
+    # actions/python-versions is 3.9.13 from 2022 against 3.9.25 on linux and
+    # windows, so that one cell is left out rather than testing a stale build.
+    # actions/python-versions also has no 3.9 build for ubuntu 26.04 (3.10 and
+    # up have one), so when ubuntu-latest moves the 3.9 cells here and in
+    # integration need pinning to ubuntu-24.04, or the floor raising.
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        exclude:
+          - {os: "macos-latest", python-version: "3.9"}
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      # bash on every OS. windows-latest would otherwise run this under pwsh,
+      # where a failing pip does not abort the block and only the last command
+      # decides the step result, so a failed install from GitHub would go
+      # unnoticed and the suite would silently test the PyPI modelx instead.
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        # modelx comes from GitHub, not from PyPI
+        pip install git+https://github.com/fumitoh/modelx.git
+        # editable, so that "python -m modelx_cython" resolves in the
+        # subprocesses the sample tests spawn with their own cwd and PYTHONPATH
+        pip install -e .
+        pip install pytest
+    - name: Test with pytest
+      run: pytest modelx_cython/tests/ --ignore=modelx_cython/tests/test_samples.py --ignore=modelx_cython/tests/test_annuallife.py
+
+  integration:
+    # test_samples.py and test_annuallife.py translate the exported models and
+    # compile them with the platform C compiler, which takes minutes per cell
+    # rather than seconds, so they run on a narrower slice.
+    # No compiler setup step is needed: ubuntu-latest ships gcc and the headers
+    # come with the interpreter setup-python installs, macos-latest ships the
+    # Xcode command line tools, and on windows-latest the setup.py that
+    # modelx-cython generates finds MSVC through vswhere.exe by itself, the way
+    # setuptools always has.
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include: [{os: "ubuntu-latest", python-version: "3.9"},
+                  {os: "ubuntu-latest", python-version: "3.11"},
+                  {os: "ubuntu-latest", python-version: "3.13"},
+                  {os: "ubuntu-latest", python-version: "3.14"},
+                  {os: "windows-latest", python-version: "3.11"},
+                  {os: "windows-latest", python-version: "3.13"},
+                  {os: "windows-latest", python-version: "3.14"},
+                  {os: "macos-latest", python-version: "3.11"},
+                  {os: "macos-latest", python-version: "3.14"}
+        ]
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install dependencies
+      # see the note in the unit job: bash so a failing pip aborts on Windows too
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        # modelx and lifelib come from GitHub, not from PyPI. modelx goes first
+        # because lifelib only requires modelx>=0.32 and would pull it from PyPI.
+        pip install git+https://github.com/fumitoh/modelx.git
+        pip install git+https://github.com/lifelib-dev/lifelib.git
+        pip install -e .
+        # pandas and openpyxl read the lifelib model inputs; psutil is imported
+        # by samples/basicterm_s/benchmark.py and samples/basicterm_sc/benchmark.py
+        pip install pytest pandas openpyxl psutil
+    - name: Test with pytest
+      env:
+        # link.exe obeys no long-path setting, so a build path past MAX_PATH
+        # fails with LNK1104. The default pytest tmp tree leaves only about 40
+        # characters of headroom for the deepest sample (tradlife_a_ex1), so
+        # this is insurance rather than a known break.
+        # The forward slash matters: pytest splits PYTEST_ADDOPTS with shlex in
+        # POSIX mode, which would swallow the backslash of "C:\t".
+        PYTEST_ADDOPTS: ${{ runner.os == 'Windows' && '--basetemp=C:/t' || '' }}
+      run: pytest modelx_cython/tests/
+
+  free-threaded:
+    # The generated setup.py compiles with the freethreading_compatible
+    # directive and samples/locked_spaces runs the compiled model from eight
+    # threads, so this exercises translation, compilation and the compiled
+    # model, not just the interpreter. Cython publishes no cp314t wheel, so pip
+    # falls back to the pure-Python one here and cythonize is slower than on
+    # every other cell -- expected, not a regression.
+    # PYTHON_GIL is deliberately left unset: samples/locked_spaces/assert_cy.py
+    # asserts that importing the compiled package did not re-enable the GIL,
+    # and forcing the GIL off would make that assertion vacuous.
+    # The lifelib samples are deselected; integration already runs them, and
+    # they would only add pandas, openpyxl and psutil to a job about the compiler.
+
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up free-threaded Python 3.14
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.14t"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install git+https://github.com/fumitoh/modelx.git
+        pip install -e .
+        pip install pytest
+    - name: Test with pytest
+      run: pytest modelx_cython/tests/ --deselect modelx_cython/tests/test_annuallife.py --deselect modelx_cython/tests/test_samples.py::test_mx2cy_with_lifelib
