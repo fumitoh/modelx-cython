@@ -458,9 +458,10 @@ class CombinedRefInfo:
         or ``''`` when the value is not a model space.
     decl_type_expr : str
         Class path used to declare the ref: relative to ``module``
-        when the class's fully-qualified name starts with the
-        module's name (in practice, classes defined in submodules),
-        fully qualified otherwise; ``''`` for non-space refs.
+        when the class is defined in ``module`` itself (its
+        fully-qualified name starts with ``module`` on a dotted
+        boundary), fully qualified otherwise; ``''`` for non-space
+        refs.
     is_relative : bool
         True when ``decl_type_expr`` is relative to ``module``.
     """
@@ -485,8 +486,10 @@ class CombinedRefInfo:
         if rt_info:
 
             if rt_info.mx_class:
-                if rt_info.mx_class[:len(module)] == module:
-                    # Defined in a child space
+                if rt_info.mx_class.startswith(module + "."):
+                    # Defined in the module itself; a bare prefix match
+                    # would also catch a module whose name merely
+                    # extends this one, so test on the dot boundary.
                     decl_type_expr = rt_info.mx_class[len(module) + 1:]
                     is_relative = True
                 else:
