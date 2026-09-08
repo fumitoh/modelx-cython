@@ -89,10 +89,35 @@ status of the `setup.py build_ext --inplace` subprocess is returned.
 
 `setup.py`
 : Cython build script (generated; the path can be changed with
-  `--setup`).  It sets the Cython directive `freethreading_compatible`,
-  so that importing the compiled package on a free-threaded build of
-  Python does not re-enable the GIL (see {doc}`freethreading`); the
-  directive does nothing on a build with the GIL.
+  `--setup`).  It sets two Cython directives.  `freethreading_compatible`
+  makes importing the compiled package on a free-threaded build of Python
+  not re-enable the GIL (see {doc}`freethreading`); the directive does
+  nothing on a build with the GIL.  `cpow` makes `**` follow the types of
+  its operands.  Without it, a `double` base raised to a fractional
+  exponent has to be able to return a complex number, so unless the power
+  is coerced to a C floating type directly it is evaluated on
+  `double complex` and narrowed back, which is slower and does not
+  compile at all once the result is compared: a cells such as
+  `max((1 + rate(t)) ** (1 / 12) - 1, floor())` fails with "complex types
+  are unordered".  A power of two C-typed integers is widened to `double`
+  instead, which a cells typed as returning an integer cannot take
+  ("Cannot assign type 'double' to 'long long'").
+
+  In exchange, a power of two C-typed integers stays integral, so a
+  negative exponent gives `0` whatever the base (`2 ** -3` is `0`, not
+  `0.125`; `1 ** -1` is `0`, not `1.0`) and a large positive one wraps at
+  64 bits.  A negative base with a fractional exponent gives `nan`, where
+  before it gave a complex number, or a `TypeError` out of a cells typed
+  as returning a `double`.  Formulas that raise a positive floating-point
+  base, the usual case in a model, are unaffected.  A model that needs
+  the Python semantics back can be translated with `--translate-only`,
+  have `"cpow": True` deleted from the generated script by hand, and then
+  be compiled with `--compile-only`, which leaves the script as it is.
+
+  Because `cythonize` decides what to recompile from file timestamps
+  rather than from the directives, a tree translated by an earlier
+  version of `mx2cy` has to be translated again, not just recompiled with
+  `--compile-only`, for a change of directives to take effect.
 
 `<model>_cy/`
 : The translated and compiled package (output).

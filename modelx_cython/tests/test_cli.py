@@ -11,8 +11,25 @@ def test_create_setup_declares_free_threading(tmp_path):
                   pathlib.PurePath("Model_nomx_cy/_mx_classes.py")],
                  setup_file)
     code = setup_file.read_text(encoding="utf-8")
-    assert 'compiler_directives={"freethreading_compatible": True}' in code
+    assert '"freethreading_compatible": True' in code
     assert '"Model_nomx_cy/_mx_classes.py"' in code
+
+
+def test_create_setup_asks_for_real_pow(tmp_path):
+    """``**`` must compile to C ``pow``, not to complex arithmetic.
+
+    Without the ``cpow`` directive, Cython gives ``**`` the semantics of
+    Python's: a typed ``double`` base raised to a fractional exponent may
+    have a complex result, so unless the power is assigned straight to a C
+    floating type, it is evaluated on ``double complex`` and narrowed
+    back.  A cells such as ``max((1 + rate(t)) ** (1 / 12) - 1, floor())``
+    then does not compile at all.
+    """
+    setup_file = tmp_path / "setup.py"
+    create_setup("Model_nomx_cy",
+                 [pathlib.PurePath("Model_nomx_cy/_mx_classes.py")],
+                 setup_file)
+    assert '"cpow": True' in setup_file.read_text(encoding="utf-8")
 
 
 def test_iter_module_files(tmp_path):

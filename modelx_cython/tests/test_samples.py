@@ -233,8 +233,8 @@ def test_locked_spaces(sample_dir):
     for path in unlocked.rglob("*.py*"):
         if path.name != "_mx_sys.pxd":
             assert "_mx_lock" not in path.read_text(encoding="utf-8"), path
-    assert 'compiler_directives={"freethreading_compatible": True}' in (
-        work_dir / "setup.py").read_text(encoding="utf-8")
+    setup_code = (work_dir / "setup.py").read_text(encoding="utf-8")
+    assert '"freethreading_compatible": True' in setup_code
 
     # compile the locked model and run it from eight threads
     assert subprocess.run(
@@ -359,6 +359,55 @@ def test_various_types(sample_dir, model, sample, assertion):
         env=env,
         capture_output=True,
         text=True
+    ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["fractional_power", "FractionalPower"]],
+                         indirect=["sample_dir"])
+def test_fractional_power(sample_dir, model):
+    """``x ** (1/12)`` on a typed double compiles to a real ``pow``
+
+    Cython lets ``**`` return a complex number, because a negative base
+    raised to a fractional exponent has one, so unless the power is
+    assigned straight to a C floating type it is evaluated on
+    ``double complex`` and narrowed back with ``__Pyx_SoftComplexToDouble``.
+    That is slower than a ``pow`` call, and where the result is compared,
+    as in ``max((1 + ann_rate(t)) ** (1 / 12) - 1, guar_rate())``, it does
+    not compile at all: "complex types are unordered".  The generated
+    ``setup.py`` therefore sets the ``cpow`` directive.  ``assert_cy.py``
+    also pins what that costs, on ``int_pow``: a power of two C-typed
+    integers stays integral, so ``2 ** -t`` is ``0`` rather than a
+    fraction.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--no-spec"]
+
+    # without cpow this fails to cythonize: "complex types are unordered"
+    assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
+
+    # mth_rate and mth_q are typed double, which is what sends Cython down
+    # the complex path in the first place, and int_pow's operands are both
+    # C integers, which is what makes it integral arithmetic
+    pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+    assert "cdef double[11] _v_mth_rate\n" in pxd
+    assert "cdef double[11] _v_mth_q\n" in pxd
+    assert "cdef double _f_int_pow(_c_Space1 self, long long t)\n" in pxd
+
+    # mth_q is not compared, so it would cythonize either way, but only
+    # with cpow does it come out as a plain pow() on doubles
+    assert '"cpow": True' in (
+        work_dir / "setup.py").read_text(encoding="utf-8")
+    c_src = (work_dir / (model + "_nomx_cy") / "_mx_classes.c").read_text(
+        encoding="utf-8")
+    assert "__Pyx_c_pow_double" not in c_src
+    assert "__Pyx_SoftComplexToDouble" not in c_src
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")], env=env
     ).returncode == 0
 
 
