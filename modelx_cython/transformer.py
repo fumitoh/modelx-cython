@@ -62,6 +62,7 @@ from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, Clas
 
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
+from modelx_cython.powers import rewrite_powers
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -480,14 +481,37 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
     def __init__(
         self,
         source: str,
-        module: ModuleInfo
+        module: ModuleInfo,
+        resolver=None,
+        cells_kinds=None,
+        ref_kinds=None,
     ) -> None:
-        """Parse ``source`` and record the module info and package."""
+        """Parse ``source`` and record the module info and package.
+
+        ``resolver``, ``cells_kinds`` and ``ref_kinds`` are the
+        model-wide inputs of :mod:`modelx_cython.powers`; without them
+        no ``**`` is rewritten and every formula body is emitted as
+        modelx exported it.
+        """
         super().__init__()
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self._module_node = self.wrapper.module
         self.module = module
         self.package = module.fqname.split(".")[0]
+        self._resolver = resolver
+        self._cells_kinds = cells_kinds or {}
+        self._ref_kinds = ref_kinds or {}
+
+    def _rewrite_powers(self, node, cls_info, cells):
+        """Rewrite the provably real ``**`` of one formula body.
+
+        See :mod:`modelx_cython.powers`; the node is returned unchanged
+        when no operand pair can be typed.
+        """
+        return rewrite_powers(
+            node, self._resolver, self._cells_kinds, self._ref_kinds,
+            cls_info.fqname, cells,
+        )
 
     @property   # cannot use cached_property in Transformer
     def transformed(self):
@@ -819,6 +843,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # leave as a plain Python method
                     return updated_node
 
+                updated_node = self._rewrite_powers(
+                    updated_node, cls_info, cells)
+
                 decorators = [
                     cst.Decorator(
                         decorator=cst.Attribute(
@@ -891,6 +918,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
                     return updated_node
+
+                if not cells.has_formula_def:
+                    # uncached cells: the body is the formula itself
+                    updated_node = self._rewrite_powers(
+                        updated_node, cls_info, cells)
 
                 if cells.called_with_kwargs:
                     # C-level calls are positional-only, so a cells called
