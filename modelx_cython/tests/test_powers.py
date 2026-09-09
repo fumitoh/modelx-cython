@@ -2,8 +2,8 @@ import libcst as cst
 import pytest
 
 from modelx_cython.powers import (
-    KIND_FLOAT, KIND_INT, KIND_UNKNOWN, OperandKind, kind_of_type_expr,
-    rewrite_powers,
+    KIND_FLOAT, KIND_INT, KIND_UNKNOWN, OperandKind, build_kind_maps,
+    kind_of_type_expr, rewrite_powers,
 )
 from modelx_cython.usage import CellsResolver
 
@@ -65,6 +65,11 @@ def kind():
     ("len(y)", KIND_UNKNOWN),
     ("self.np.exp(x)", KIND_UNKNOWN),
     ("x + local", KIND_UNKNOWN),
+    # true division yields a float only for operands that are numbers at
+    # all: an unknown operand must win over the Divide shortcut, or an
+    # array divided by an int would count as a floating exponent
+    ("local / 12", KIND_UNKNOWN),
+    ("self.arr(t) / 12", KIND_UNKNOWN),
     ("t & 1", KIND_UNKNOWN),
     ('"s"', KIND_UNKNOWN),
 ])
@@ -100,6 +105,9 @@ class _FakeCells:
         return True
 
     def get_argtype_expr(self, arg, c_style=False):
+        # the C-style spelling is what kind_of_type_expr matches, so a
+        # caller that forgot c_style=True must not silently pass
+        assert c_style, "powers must ask for the C-style type expression"
         return "long long" if arg == "t" else "double"
 
 
@@ -147,11 +155,17 @@ def test_floating_exponent_is_rewritten(body):
     "return self.arr(t)[0] ** 0.5",
     "return local ** 0.5",
     "return x ** local",
-    # a comprehension or lambda can shadow a parameter, so nothing
-    # inside one is rewritten
+    # a construct that binds names of its own can shadow a parameter, and
+    # the parameter's declared C type would not apply to the shadowing
+    # name, so nothing inside one is rewritten
     "return sum(x ** (1 / 12) for x in range(3))",
     "return [x ** (1 / 12) for x in range(3)]",
+    "return {x ** (1 / 12) for x in range(3)}",
+    "return {i: x ** (1 / 12) for i, x in enumerate([2.0])}",
     "return (lambda x: x ** (1 / 12))(2.0)",
+    "def inner(x):\n        return x ** (1 / 12)\n    return inner(local)",
+    "def inner(t):\n        return 2 ** (t / 12)\n    return inner(local)",
+    "class C:\n        x = 3.0\n        v = x ** (1 / 12)\n    return C.v",
 ])
 def test_left_alone(body):
     out = _rewrite(body)
@@ -170,3 +184,87 @@ def test_without_a_resolver_nothing_is_rewritten():
         "def _f_target(self, t, x):\n    return x ** 0.5\n")
     out = rewrite_powers(func, None, {}, {}, CLS, _FakeCells())
     assert out is func
+
+
+def test_an_integer_base_is_cast_explicitly():
+    """``_mx_pow`` takes doubles; narrowing the base implicitly costs an
+    MSVC C4244 warning on a build that was warning-free before."""
+    assert "_mx_sys._mx_pow(_mx_cy.cast(_mx_cy.double, t), (1 / 12))" in (
+        _rewrite("return t ** (1 / 12)"))
+    # a base that is already floating needs no cast
+    out = _rewrite("return x ** (1 / 12)")
+    assert "_mx_sys._mx_pow(x, (1 / 12))" in out
+    assert "cast" not in out
+
+
+class _FakeCellsInfo:
+    def __init__(self, fqname, rettype):
+        self.fqname = fqname
+        self._rettype = rettype
+
+    def get_rettype_expr(self, c_style=False):
+        assert c_style
+        return self._rettype
+
+
+class _FakeRefInfo:
+    def __init__(self, type_expr):
+        self._type_expr = type_expr
+
+    def get_type_expr(self, c_style=False):
+        assert c_style
+        return self._type_expr
+
+
+class _FakeClassInfo:
+    def __init__(self, fqname, cells, refs):
+        self.fqname = fqname
+        self.cells = cells
+        self.refs = refs
+
+
+class _FakeModuleInfo:
+    def __init__(self, classes):
+        self.classes = classes
+
+
+def test_build_kind_maps():
+    """The maps must key cells by fqname and refs by class fqname, and
+    must ask for the C-style spelling of every type."""
+    info = _FakeModuleInfo({
+        "_c_Space1": _FakeClassInfo(
+            CLS,
+            cells={"rate": _FakeCellsInfo(RATE, "double"),
+                   "count": _FakeCellsInfo(COUNT, "long long"),
+                   "arr": _FakeCellsInfo(ARR, "const double[:]")},
+            refs={"rate_ref": _FakeRefInfo("double"),
+                  "n_ref": _FakeRefInfo("long long"),
+                  "table": _FakeRefInfo("object")},
+        )
+    })
+    cells_kinds, ref_kinds = build_kind_maps({"Model_nomx._mx_classes": info})
+
+    assert cells_kinds == {RATE: KIND_FLOAT, COUNT: KIND_INT,
+                           ARR: KIND_UNKNOWN}
+    assert ref_kinds == {CLS: {"rate_ref": KIND_FLOAT, "n_ref": KIND_INT,
+                               "table": KIND_UNKNOWN}}
+
+
+def test_kind_maps_feed_the_classifier():
+    """build_kind_maps' output is what OperandKind consumes, so a ref
+    typed through it must classify the same way."""
+    info = _FakeModuleInfo({
+        "_c_Space1": _FakeClassInfo(
+            CLS,
+            cells={"rate": _FakeCellsInfo(RATE, "double")},
+            refs={"rate_ref": _FakeRefInfo("double")},
+        )
+    })
+    cells_kinds, ref_kinds = build_kind_maps({"Model_nomx._mx_classes": info})
+    kind = OperandKind(
+        CellsResolver({CLS: {"rate": RATE}}, {CLS: {"rate_ref": ""}},
+                      {CLS: {}}),
+        cells_kinds, ref_kinds, CLS, {},
+    )
+    assert kind.kind(cst.parse_expression("self.rate(0)")) == KIND_FLOAT
+    assert kind.kind(cst.parse_expression("self.rate_ref")) == KIND_FLOAT

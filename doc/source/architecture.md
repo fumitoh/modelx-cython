@@ -164,12 +164,13 @@ numeric literal, a parameter or reference mx2cy has already typed, a
 call to a cells the resolver reaches, or arithmetic over those; true
 division counts as floating, which is what makes the `1 / 12` idiom
 work.  Everything else — local variables, subscripts, module
-attributes, and anything inside a comprehension or a lambda, where a
-name can shadow a parameter — is unknown, and an unknown operand leaves
-the power exactly as modelx exported it.  Powers left alone are logged
-at `INFO` level; they behave as they would without this pass, so one in
-an ordering context still fails to compile rather than returning a
-wrong number.
+attributes, and anything inside a construct that binds names of its own
+— a comprehension, a lambda, a nested `def` or `class` — where a name
+can shadow a parameter, is unknown, and an unknown operand leaves the
+power exactly as modelx exported it.  Every power left alone that could
+still be on the complex path is logged at `INFO` level; such a power
+behaves as it would without this pass, so one in an ordering context
+still fails to compile rather than returning a wrong number.
 
 `_mx_pow` raises rather than returning the value C `pow` would in the
 two cases where it disagrees with Python: a negative base with a

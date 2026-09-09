@@ -387,7 +387,7 @@ def test_fractional_power(sample_dir, model):
             "--sample", str(work_dir / "sample.py"),
             "--no-spec"]
 
-    # without cpow this fails to cythonize: "complex types are unordered"
+    # without the rewrite this fails: "complex types are unordered"
     assert subprocess.run(argv, env=env, cwd=work_dir).returncode == 0
 
     # mth_rate and mth_q are typed double, which is what sends Cython down

@@ -36,11 +36,12 @@ The proof is the conservative classifier below.  Every operand is
 numeric literals, the declaring cells' own parameters, calls to cells
 the resolver reaches, scalar references and arithmetic over those are
 ever known.  Everything else -- local variables, subscripts, module
-attributes, and anything inside a comprehension or a lambda -- is
-unknown, and an unknown operand leaves the power exactly as modelx
-exported it.  A power that is left alone therefore behaves as it does
-without this pass: usually it compiles, and where it is compared it
-still fails, which is a loud error rather than a wrong number.
+attributes, and anything inside a construct that binds names of its own,
+where a name can shadow a parameter of the cells -- is unknown, and an
+unknown operand leaves the power exactly as modelx exported it.  A power
+that is left alone therefore behaves as it does without this pass:
+usually it compiles, and where it is compared it still fails, which is a
+loud error rather than a wrong number.
 
 Attributes
 ----------
@@ -56,7 +57,7 @@ from typing import Dict, List, Mapping, Optional
 
 import libcst as cst
 
-from modelx_cython.consts import MX_POW, MX_SYS_MOD
+from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
 
@@ -74,12 +75,15 @@ _NUMERIC_OPS = (
     cst.Power,
 )
 
-# Expressions that introduce their own bindings.  A name bound by one
-# of these can shadow a parameter, so its declared C type would not
-# apply; rather than track the shadowing, no power inside one is ever
-# rewritten.
+# Constructs that introduce their own bindings.  A name bound by one of
+# these can shadow a parameter of the cells, and the parameter's declared
+# C type would not apply to it; rather than track the shadowing, no power
+# inside one is ever rewritten.  A nested ``def`` or ``class`` belongs
+# here as much as a comprehension does: modelx exports such a formula
+# verbatim, and its body reaches Cython inside the ``@cfunc`` method.
 _OPAQUE_SCOPES = (
     cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp, cst.Lambda,
+    cst.FunctionDef, cst.ClassDef,
 )
 
 
@@ -239,6 +243,12 @@ class _PowerRewriter(cst.CSTTransformer):
         if not isinstance(original_node.operator, cst.Power):
             return updated_node
         if self._opaque_depth:
+            # a name here may be bound by the enclosing comprehension,
+            # lambda or nested def rather than by the cells, so nothing
+            # can be typed from the parameters
+            self.declined.append(
+                cst.Module([]).code_for_node(original_node).strip()
+            )
             return updated_node
         # classify the original operands: a nested power has already
         # been rewritten into a call in ``updated_node``
@@ -251,7 +261,7 @@ class _PowerRewriter(cst.CSTTransformer):
                     value=cst.Name(MX_SYS_MOD), attr=cst.Name(MX_POW)
                 ),
                 args=[
-                    cst.Arg(value=updated_node.left),
+                    cst.Arg(value=self._as_double(updated_node.left, base)),
                     cst.Arg(value=updated_node.right),
                 ],
                 lpar=updated_node.lpar,
@@ -264,6 +274,25 @@ class _PowerRewriter(cst.CSTTransformer):
                 cst.Module([]).code_for_node(original_node).strip()
             )
         return updated_node
+
+    @staticmethod
+    def _as_double(expr, kind):
+        """Cast an integer base explicitly.
+
+        ``_mx_pow`` takes two doubles, and letting the C compiler narrow
+        the base implicitly costs an MSVC C4244 warning on a build that
+        was warning-free before.
+        """
+        if kind != KIND_INT:
+            return expr
+        return cst.Call(
+            func=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cast")),
+            args=[
+                cst.Arg(value=cst.Attribute(
+                    value=cst.Name(CY_MOD), attr=cst.Name(CY_FLOAT_T))),
+                cst.Arg(value=expr.with_changes(lpar=(), rpar=())),
+            ],
+        )
 
 
 def rewrite_powers(
@@ -294,7 +323,8 @@ def rewrite_powers(
     -------
     libcst.FunctionDef
         The method, with each rewritable ``**`` replaced by a call to
-        ``_mx_sys._mx_pow``.  Powers left alone are logged at INFO.
+        ``_mx_sys._mx_pow``.  Every power left alone that could still be
+        on Cython's complex path is logged at INFO.
     """
     if resolver is None:
         return node
@@ -310,8 +340,8 @@ def rewrite_powers(
     updated = node.body.visit(rewriter)
     if rewriter.declined:
         _logger.info(
-            f"'**' left on Cython's complex path in {cells.fqname}, because "
-            "an operand has no sampled C type: "
+            f"'**' left as exported in {cells.fqname}, so a fractional "
+            "exponent there still compiles to complex arithmetic: "
             + "; ".join(rewriter.declined[:3])
         )
     if not rewriter.rewritten:
