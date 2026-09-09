@@ -233,8 +233,8 @@ def test_locked_spaces(sample_dir):
     for path in unlocked.rglob("*.py*"):
         if path.name != "_mx_sys.pxd":
             assert "_mx_lock" not in path.read_text(encoding="utf-8"), path
-    setup_code = (work_dir / "setup.py").read_text(encoding="utf-8")
-    assert '"freethreading_compatible": True' in setup_code
+    assert 'compiler_directives={"freethreading_compatible": True}' in (
+        work_dir / "setup.py").read_text(encoding="utf-8")
 
     # compile the locked model and run it from eight threads
     assert subprocess.run(
@@ -373,11 +373,12 @@ def test_fractional_power(sample_dir, model):
     ``double complex`` and narrowed back with ``__Pyx_SoftComplexToDouble``.
     That is slower than a ``pow`` call, and where the result is compared,
     as in ``max((1 + ann_rate(t)) ** (1 / 12) - 1, guar_rate())``, it does
-    not compile at all: "complex types are unordered".  The generated
-    ``setup.py`` therefore sets the ``cpow`` directive.  ``assert_cy.py``
-    also pins what that costs, on ``int_pow``: a power of two C-typed
-    integers stays integral, so ``2 ** -t`` is ``0`` rather than a
-    fraction.
+    not compile at all: "complex types are unordered".  Those two powers
+    have a provably floating exponent, so
+    :mod:`~modelx_cython.powers` rewrites them to ``_mx_sys._mx_pow``;
+    ``int_pow`` is ``2 ** -t``, whose operands are both C integers, so it
+    must be left alone and keep Python's value (``assert_cy.py`` checks
+    that).
     """
     generate_nomx(work_dir := sample_dir, model)
     env = get_env(work_dir)
@@ -397,10 +398,15 @@ def test_fractional_power(sample_dir, model):
     assert "cdef double[11] _v_mth_q\n" in pxd
     assert "cdef double _f_int_pow(_c_Space1 self, long long t)\n" in pxd
 
+    # only the two floating-exponent powers are rewritten
+    src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
+        encoding="utf-8")
+    assert "_mx_sys._mx_pow((1 + self.ann_rate(t)), (1 / 12))" in src
+    assert "_mx_sys._mx_pow((1 - self.ann_q(t)), (1 / 12))" in src
+    assert "return 2 ** -t" in src
+
     # mth_q is not compared, so it would cythonize either way, but only
-    # with cpow does it come out as a plain pow() on doubles
-    assert '"cpow": True' in (
-        work_dir / "setup.py").read_text(encoding="utf-8")
+    # after the rewrite does it come out as a plain pow() on doubles
     c_src = (work_dir / (model + "_nomx_cy") / "_mx_classes.c").read_text(
         encoding="utf-8")
     assert "__Pyx_c_pow_double" not in c_src

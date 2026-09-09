@@ -1,3 +1,27 @@
+from libc.math cimport pow as _mx_c_pow, floor as _mx_c_floor
+
+
+cdef inline double _mx_pow(double b, double e) except? -1.0:
+    """``**`` between operands mx2cy has typed as C numbers.
+
+    Cython would otherwise evaluate a fractional power on
+    ``double complex``, which is slower and does not compile at all
+    where the result is compared.  Only powers whose exponent is
+    provably floating are rewritten to this, so integer arithmetic is
+    unaffected; see :mod:`modelx_cython.powers`.
+
+    The two cases where C ``pow`` and Python disagree raise instead of
+    returning ``nan`` or ``inf``, so that a bad input stays as loud
+    here as it is in the pure-Python model.
+    """
+    if b < 0.0 and e != _mx_c_floor(e):
+        raise ValueError(
+            "a negative number cannot be raised to a fractional power")
+    if b == 0.0 and e < 0.0:
+        raise ZeroDivisionError("0.0 cannot be raised to a negative power")
+    return _mx_c_pow(b, e)
+
+
 cdef extern from *:
     """
     /* Acquire/release accessors for the _has_ flags of locked Spaces.

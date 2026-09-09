@@ -21,6 +21,7 @@ monkeytype_tracing
 parser
 builder
 usage
+powers
 transformer
 config
 typedefs

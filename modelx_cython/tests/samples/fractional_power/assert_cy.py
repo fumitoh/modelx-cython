@@ -40,12 +40,8 @@ for t in range(11):
 assert space.mth_rate(0) == guar_rate()
 assert space.mth_rate(10) > guar_rate()
 
-# what cpow costs, pinned rather than endorsed: int_pow is 2 ** -t, whose
-# operands mx2cy types as C integers, so the power stays integral and a
-# negative exponent gives 0 whatever the base.  Python returns 0.5, 0.25,
-# ... here.  If this ever starts matching Python again, the trade-off
-# documented for the cpow directive has changed and the docs need saying so.
-assert space.int_pow(0) == 1.0
-for t in range(1, 11):
-    assert space.int_pow(t) == 0.0, (t, space.int_pow(t))
-    assert 2 ** -t != 0.0
+# int_pow is 2 ** -t, whose operands are both C integers, so the rewrite
+# must leave it alone and it must still agree with Python.  Setting the
+# cpow directive instead of rewriting would return 0.0 for every t >= 1.
+for t in range(11):
+    assert space.int_pow(t) == 2 ** -t, (t, space.int_pow(t))

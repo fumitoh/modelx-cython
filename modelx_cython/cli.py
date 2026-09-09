@@ -47,7 +47,9 @@ from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.builder import ModuleInfo
 from modelx_cython.parser import ModuleVisitor
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
-from modelx_cython.usage import analyze_usage, apply_verdicts
+from modelx_cython.usage import (
+    analyze_usage, apply_verdicts, build_resolver)
+from modelx_cython.powers import build_kind_maps
 
 _logger = logging.getLogger(__name__)
 
@@ -341,9 +343,20 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                             f"{cells.fqname} stays a Python method because "
                             "a call with keyword arguments matches its name")
 
+        # Every cells return type is final by now, so the operands of a
+        # '**' can be typed: see modelx_cython.powers.
+        module_infos = {u.module_info.fqname: u.module_info for u in units}
+        resolver = build_resolver(module_infos)
+        cells_kinds, ref_kinds = build_kind_maps(module_infos)
+
         # Phase 3: transform and write out
         for u in units:
-            trans = ModuleTransformer(u.source, u.module_info)
+            trans = ModuleTransformer(
+                u.source, u.module_info,
+                resolver=resolver,
+                cells_kinds=cells_kinds,
+                ref_kinds=ref_kinds,
+            )
             pxd = PXDGenerator(u.module_info)
 
             u.abs_src_path.write_text(trans.transformed.code, encoding="utf-8")
@@ -542,35 +555,11 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     The generated script calls :func:`setuptools.setup` with
     ``name=model_name`` and ``ext_modules`` produced by
     ``cythonize(..., annotate=True)`` over the given module paths, with
-    two Cython directives set.
-
-    ``freethreading_compatible`` is set so that importing the compiled
-    model on a free-threaded build of Python does not re-enable the GIL
-    (the directive needs Cython 3.1 or later and does nothing on a build
-    with the GIL).
-
-    ``cpow`` is set so that ``**`` follows the types of its operands.
-    Without it, ``**`` keeps Python's semantics, and a ``double`` base
-    raised to a fractional exponent has to be able to return a complex
-    number: unless the power is coerced to a C floating type directly,
-    Cython evaluates it on ``double complex`` and narrows the result
-    back.  That is slower than a ``pow`` call, and it does not compile
-    at all once the result is compared, as in
-    ``max((1 + rate(t)) ** (1 / 12) - 1, floor())`` ("complex types are
-    unordered").  A power of two C-typed integers is widened to
-    ``double`` instead, which a cells typed as returning an integer
-    cannot take ("Cannot assign type 'double' to 'long long'").
-
-    In exchange, a power of two C-typed integers stays integral, so a
-    negative exponent gives ``0`` whatever the base (``2 ** -3`` is
-    ``0``, not ``0.125``; ``1 ** -1`` is ``0``, not ``1.0``) and a large
-    positive one wraps at 64 bits.  A negative base with a fractional
-    exponent gives ``nan``, where before it gave a complex number, or a
-    ``TypeError`` out of a cells typed as returning a ``double``.
-    Formulas that raise a positive floating-point base, the usual case
-    in a model, are unaffected.
-
-    Any existing file at ``setup_file`` is overwritten.
+    the ``freethreading_compatible`` directive set so that importing the
+    compiled model on a free-threaded build of Python does not re-enable
+    the GIL (the directive needs Cython 3.1 or later and does nothing on
+    a build with the GIL).  Any existing file at ``setup_file`` is
+    overwritten.
 
     Parameters
     ----------
@@ -600,7 +589,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     {modules_str}
             ],
             annotate=True,
-            compiler_directives={{"freethreading_compatible": True, "cpow": True}}
+            compiler_directives={{"freethreading_compatible": True}}
         )
     )
     """)

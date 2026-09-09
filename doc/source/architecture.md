@@ -73,7 +73,10 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    cells and formula methods, typed parameters and return annotations,
    class-level declarations for cache variables, refs and child spaces
    in place of the `__slots__` the export declares, and C-array-backed
-   caching bodies for cells with integer parameters.
+   caching bodies for cells with integer parameters.  It is also where
+   {py:mod}`modelx_cython.powers` replaces the `**` operations whose
+   operands are provably real with a call to `_mx_sys._mx_pow`, so that
+   Cython compiles them to C `pow` rather than to complex arithmetic.
    In parallel, {py:class}`~modelx_cython.transformer.PXDGenerator` emits
    a `.pxd` declaration file per module so that modules can `cimport`
    each other.  Methods Cython cannot compile at the C level are left
@@ -135,6 +138,42 @@ Most fallback decisions — conflicting argument or return types,
 usage-analysis fallbacks, spec sizes overridden by observed maxima, and
 cells demoted to plain Python methods — are logged at `INFO` level (run
 `mx2cy` with `--log-level INFO` to see them).
+
+## Real-valued `**`
+
+Cython gives `**` the semantics of Python's, so a `double` base raised
+to a fractional exponent has to be able to return a complex number.
+Unless the power is coerced to a C floating type directly, Cython
+evaluates it on `double complex` and narrows the result back, which is
+slower than a `pow` call and does not compile at all once the result is
+compared: a formula such as
+`max((1 + rate(t)) ** (1 / 12) - 1, floor())` is rejected with "complex
+types are unordered".
+
+{py:mod}`modelx_cython.powers` rewrites the affected powers to
+`_mx_sys._mx_pow`, a `cdef inline` wrapper around C `pow` declared in
+`_mx_sys.pxd`.  Cython reaches the complex path if and only if the
+exponent is a C floating type, and integer arithmetic if and only if
+the exponent is an integer, so a power is rewritten only when its
+exponent is *provably* floating — which is why `2 ** -t` keeps Python's
+value while `(1 + rate(t)) ** (1 / 12)` does not have to.
+
+The proof is a conservative classifier over the formula's syntax tree.
+An operand is known to be floating or integral only when it is a
+numeric literal, a parameter or reference mx2cy has already typed, a
+call to a cells the resolver reaches, or arithmetic over those; true
+division counts as floating, which is what makes the `1 / 12` idiom
+work.  Everything else — local variables, subscripts, module
+attributes, and anything inside a comprehension or a lambda, where a
+name can shadow a parameter — is unknown, and an unknown operand leaves
+the power exactly as modelx exported it.  Powers left alone are logged
+at `INFO` level; they behave as they would without this pass, so one in
+an ordering context still fails to compile rather than returning a
+wrong number.
+
+`_mx_pow` raises rather than returning the value C `pow` would in the
+two cases where it disagrees with Python: a negative base with a
+fractional exponent (`nan`) and `0.0` to a negative power (`inf`).
 
 ## Cells caching in the compiled model
 
