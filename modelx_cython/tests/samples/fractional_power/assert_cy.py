@@ -45,3 +45,10 @@ assert space.mth_rate(10) > guar_rate()
 # cpow directive instead of rewriting would return 0.0 for every t >= 1.
 for t in range(11):
     assert space.int_pow(t) == 2 ** -t, (t, space.int_pow(t))
+
+# uncached_rate has no _f_ method -- its public method is the formula
+# itself -- so it goes through the transformer's other rewrite site
+for t in range(11):
+    val = space.uncached_rate(t)
+    expected = (1 + ann_rate(t)) ** (1 / 12) - 1
+    assert math.isclose(val, expected, rel_tol=1e-12), (t, val, expected)

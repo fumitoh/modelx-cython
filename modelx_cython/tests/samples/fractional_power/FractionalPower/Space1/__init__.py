@@ -33,3 +33,10 @@ def mth_q(t):
 
 def int_pow(t):
     return 2 ** -t
+
+
+def uncached_rate(t):
+    return (1 + ann_rate(t)) ** (1 / 12) - 1
+
+
+_is_cached = False
