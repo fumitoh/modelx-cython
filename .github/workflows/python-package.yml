@@ -51,12 +51,14 @@ jobs:
         pip install -e .
         pip install pytest
     - name: Test with pytest
-      run: pytest modelx_cython/tests/ --ignore=modelx_cython/tests/test_samples.py --ignore=modelx_cython/tests/test_annuallife.py
+      run: pytest modelx_cython/tests/ --ignore=modelx_cython/tests/test_samples.py --ignore=modelx_cython/tests/test_annuallife.py --ignore=modelx_cython/tests/test_uslib.py
 
   integration:
-    # test_samples.py and test_annuallife.py translate the exported models and
-    # compile them with the platform C compiler, which takes minutes per cell
-    # rather than seconds, so they run on a narrower slice.
+    # test_samples.py, test_annuallife.py and test_uslib.py translate the
+    # exported models and compile them with the platform C compiler, which
+    # takes minutes per cell rather than seconds, so they run on a narrower
+    # slice.  They are also the only tests that need lifelib, which is why
+    # the other two jobs skip them by name.
     # No compiler setup step is needed: ubuntu-latest ships gcc and the headers
     # come with the interpreter setup-python installs, macos-latest ships the
     # Xcode command line tools, and on windows-latest the setup.py that
@@ -119,7 +121,8 @@ jobs:
     # asserts that importing the compiled package did not re-enable the GIL,
     # and forcing the GIL off would make that assertion vacuous.
     # The lifelib samples are deselected; integration already runs them, and
-    # they would only add pandas, openpyxl and psutil to a job about the compiler.
+    # they would only add lifelib, pandas, openpyxl and psutil to a job about
+    # the compiler.
 
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -136,4 +139,4 @@ jobs:
         pip install -e .
         pip install pytest
     - name: Test with pytest
-      run: pytest modelx_cython/tests/ --deselect modelx_cython/tests/test_annuallife.py --deselect modelx_cython/tests/test_samples.py::test_mx2cy_with_lifelib
+      run: pytest modelx_cython/tests/ --deselect modelx_cython/tests/test_annuallife.py --deselect modelx_cython/tests/test_uslib.py --deselect modelx_cython/tests/test_samples.py::test_mx2cy_with_lifelib
