@@ -139,3 +139,33 @@ def test_ref_never_sampled_declares_object():
     assert ref.mx_class == ""
     assert not ref.is_relative
     assert ref.get_type_expr(c_style=True) == "object"
+
+
+# --------------------------------------------------------------------
+# Arrays that are not real-valued
+
+
+@pytest.mark.parametrize("value_type", [np.str_, np.bytes_, np.object_,
+                                        np.bool_, np.complex128])
+def test_rettype_non_real_array_is_object(value_type):
+    """An array of strings is not a str, and no other non-real array
+    is its element type or a memoryview either"""
+    cells = make_cells(value_type=value_type)
+    assert cells.get_rettype_expr(c_style=True) == "object"
+    assert cells.get_rettype_expr() == "object"
+
+
+def test_rettype_spec_bool_on_array_is_object():
+    """A bool array does not coerce to a bint memoryview"""
+    cells = make_cells(spec={"return_type": "bool"})
+    assert cells.get_rettype_expr(c_style=True) == "object"
+
+
+def test_rettype_0d_real_array_is_object():
+    cells = make_cells(ndim=0)
+    assert cells.get_rettype_expr(c_style=True) == "object"
+
+
+def test_rettype_str_scalar_is_str():
+    cells = make_cells(value_type=np.str_, is_array=False, ndim=0)
+    assert cells.get_rettype_expr(c_style=True) == "str"
