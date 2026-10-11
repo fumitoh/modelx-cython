@@ -34,3 +34,16 @@ def test_iter_module_files(tmp_path):
     }
     for fqname, path in found.items():
         assert path.is_file()
+
+
+def test_create_setup_adds_spec_directives(tmp_path):
+    setup_file = tmp_path / "setup.py"
+    create_setup("Model_nomx_cy",
+                 [pathlib.PurePath("Model_nomx_cy/_mx_classes.py")],
+                 setup_file,
+                 compiler_directives={"infer_types": True,
+                                      "c_string_type": "str"})
+    code = setup_file.read_text(encoding="utf-8")
+    assert ('compiler_directives={"freethreading_compatible": True, '
+            '"infer_types": True, "c_string_type": \'str\'}') in code
+    compile(code, "setup.py", "exec")

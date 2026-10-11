@@ -35,6 +35,7 @@ import pathlib
 import shutil
 import runpy
 import ast
+import json
 import argparse
 import dataclasses
 import logging
@@ -214,13 +215,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     location (``args.setup`` if given, otherwise ``setup.py`` in the
     same parent directory).
 
-    Unless ``args.compile_only`` is set, performs the translation:
-    rotates backups of the output directory, copies the model there,
-    copies the bundled ``_mx_sys.pxd`` into it, runs the sample script
-    under tracing via :func:`run_sample`, and reads the spec file with
+    Unless ``args.compile_only`` is set, performs the translation.
+    First, before anything is written: reads the spec file with
     :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
     missing spec file re-raises :class:`FileNotFoundError` with a hint
-    to use ``--no-spec``).  Translation proper then runs in three
+    to use ``--no-spec``) and validates its model-wide key
+    ``compiler_directives``.  Then rotates backups of the output
+    directory, copies the model there, copies the bundled
+    ``_mx_sys.pxd`` into it, and runs the sample script under tracing
+    via :func:`run_sample`.  Translation proper then runs in three
     phases: (1) parse every model/space module and build its
     :class:`~modelx_cython.builder.ModuleInfo` -- all space modules
     are included even when the sample never exercised their cells
@@ -235,7 +238,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     (3) rewrite each included module with
     :class:`~modelx_cython.transformer.ModuleTransformer`, write its
     ``.pxd`` and ``__init__.pxd`` files, and finally write the
-    generated ``setup.py`` via :func:`create_setup`.  Model sources
+    generated ``setup.py`` via :func:`create_setup`, with the spec's
+    compiler directives.  Model sources
     are read and written as UTF-8 regardless of locale.
 
     Unless ``args.translate_only`` is set, compiles the result with
@@ -263,6 +267,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     FileNotFoundError
         If translation is performed (``--compile-only`` not set), the
         spec file does not exist, and ``--no-spec`` was not given.
+    ValueError
+        If the spec is invalid.
     """
 
     orig_path = pathlib.Path(args.model_path).resolve()
@@ -272,11 +278,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     setup_file = pathlib.Path(args.setup) if args.setup else work_dir / "setup.py"
 
     if not args.compile_only:
-        increment_backups(model_path)
-        shutil.copytree(orig_path, model_path)
-        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
-
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        # The spec is checked before the sample run, which can take
+        # long, and before the output is written, so that a mistake in
+        # it fails at once.
         if args.no_spec:
             d = {}
         else:
@@ -286,6 +290,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
+        compiler_directives = spec.get_compiler_directives()
+
+        increment_backups(model_path)
+        shutil.copytree(orig_path, model_path)
+        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
+
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -364,7 +375,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
-        create_setup(model_name, modules=modules, setup_file=setup_file)
+        create_setup(model_name, modules=modules, setup_file=setup_file,
+                     compiler_directives=compiler_directives)
 
     if args.translate_only:
         return 0
@@ -549,7 +561,8 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
     return main_handler(args, stdout, stderr)
 
 
-def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path):
+def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path,
+                 compiler_directives: Optional[dict] = None):
     """Write a ``setup.py`` that cythonizes the translated modules.
 
     The generated script calls :func:`setuptools.setup` with
@@ -558,8 +571,9 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     the ``freethreading_compatible`` directive set so that importing the
     compiled model on a free-threaded build of Python does not re-enable
     the GIL (the directive needs Cython 3.1 or later and does nothing on
-    a build with the GIL).  Any existing file at ``setup_file`` is
-    overwritten.
+    a build with the GIL), followed by the ``compiler_directives`` of
+    the spec, which may also override ``freethreading_compatible``.  Any
+    existing file at ``setup_file`` is overwritten.
 
     Parameters
     ----------
@@ -572,11 +586,19 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
         into the script via its ``as_posix`` method.
     setup_file : pathlib.Path
         Path of the ``setup.py`` file to write.
+    compiler_directives : dict, optional
+        Further Cython compiler directives, as returned by
+        :meth:`~modelx_cython.config.TransSpec.get_compiler_directives`.
     """
 
     modules_str = textwrap.indent(",\n".join(
         ['"' + s.as_posix() + '"' for s in modules]
     ), " " * 8)
+
+    directives = {"freethreading_compatible": True}
+    directives.update(compiler_directives or {})
+    directives_str = "{" + ", ".join(
+        f"{json.dumps(k)}: {v!r}" for k, v in directives.items()) + "}"
 
     setup_script = textwrap.dedent("""\
     import sys
@@ -589,7 +611,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     {modules_str}
             ],
             annotate=True,
-            compiler_directives={{"freethreading_compatible": True}}
+            compiler_directives={directives_str}
         )
     )
     """)
@@ -597,7 +619,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_file.write_text(
         setup_script.format(
             model_name=model_name,
-            modules_str=modules_str),
+            modules_str=modules_str,
+            directives_str=directives_str),
         encoding="utf-8")
 
 

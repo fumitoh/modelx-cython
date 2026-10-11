@@ -1,5 +1,19 @@
 # Release Notes
 
+## Unreleased
+
+### Spec keys
+
+* `compiler_directives` (top level): Cython compiler directives for the
+  generated `setup.py`, such as `{"infer_types": True}`, checked against
+  the installed Cython.  `infer_types=True` can type a local as a 32-bit
+  C `long` on Windows, which wraps around silently on overflow.
+  `cpow=True`, `language_level=2`, `annotation_typing=False` and
+  `legacy_implicit_noexcept=True` are rejected: each would silently
+  change what the compiled model computes.
+
+See {doc}`spec` and {doc}`architecture`.
+
 ## v0.1.0 (5 September 2026)
 
 This release supports the two export options that

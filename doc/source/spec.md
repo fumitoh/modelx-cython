@@ -37,6 +37,9 @@ dicts of the same shape:
                     {"cells_param_size": {"t": 100}}}}}}
 ```
 
+The top level can also hold the model-wide key `compiler_directives`
+({ref}`model-wide-keys`).
+
 ## Keys
 
 ### `spaces`
@@ -100,6 +103,53 @@ Maps cells names to per-cells settings.  Currently one setting is defined:
      {"disc_factors": {"return_type": "object"},
       "arr_whole": {"return_type": "memoryview"}}}
 ```
+
+(model-wide-keys)=
+### Model-wide keys
+
+These keys are read from the top level of the spec only.
+
+`compiler_directives`
+: A dict of [Cython compiler
+  directives](https://cython.readthedocs.io/en/latest/src/userguide/source_files_and_compilation.html#compiler-directives),
+  passed to `cythonize` in the generated `setup.py` after
+  `freethreading_compatible`, which `mx2cy` always sets (and which this
+  key can override):
+
+  ```python
+  {"compiler_directives": {"infer_types": True},
+   "spaces": {...}}
+  ```
+
+  Each directive must be one the installed Cython knows and that applies
+  to a whole module, and its value must be of the directive's type
+  (`True`/`False` for a boolean directive, `None` too where that is
+  its default, as for `infer_types`; an integer, a string, or one of the
+  strings an enumerated directive accepts); anything else fails the
+  translation before the sample run.
+
+  `mx2cy` translates the model for some directive values, and rejects
+  the others, which would silently change what the compiled model
+  computes:
+
+  | Directive | Rejected value | Why |
+  |---|---|---|
+  | `cpow` | `True` | A power of two C integers stays an integer: `2 ** -3` is `0`. |
+  | `language_level` | `2` | `/` between C integers is floor division: `3 / 12` is `0`. |
+  | `annotation_typing` | `False` | `mx2cy` declares the C types of the translated code with annotations. |
+  | `legacy_implicit_noexcept` | `True` | An exception raised in a compiled formula is printed and swallowed, and the formula returns a meaningless value. |
+
+  Other directives change what the compiled model computes by design,
+  and `mx2cy` does not guard against that.  With `infer_types=True`, Cython types an
+  untyped local variable as a C integer when every assignment to it is a
+  C integer expression.  A local initialized from an integer literal and
+  then only multiplied or added to becomes a C `long`, which is 32 bits
+  wide on Windows, and the C integer **silently wraps around on
+  overflow** where the Python integer would have grown.  (The default,
+  `None`, infers only types that are safe.)  `boundscheck=False`,
+  `wraparound=False` and `cdivision=True` likewise trade Python's
+  semantics — index checks, negative indices, the sign of `%` and `//`
+  and `ZeroDivisionError` — for speed.
 
 (deprecated-keys)=
 ## Deprecated keys
