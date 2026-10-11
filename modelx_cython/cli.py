@@ -35,6 +35,7 @@ import pathlib
 import shutil
 import runpy
 import ast
+import json
 import argparse
 import dataclasses
 import logging
@@ -45,11 +46,13 @@ from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.config import TransSpec
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.builder import ModuleInfo
-from modelx_cython.parser import ModuleVisitor
+from modelx_cython.parser import (
+    ModuleVisitor, check_reserved_names, check_type_words)
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
     analyze_usage, apply_verdicts, build_resolver)
-from modelx_cython.powers import build_kind_maps
+from modelx_cython.powers import (
+    build_kind_maps, build_math_refs, demote_rebound_params)
 
 _logger = logging.getLogger(__name__)
 
@@ -214,28 +217,45 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     location (``args.setup`` if given, otherwise ``setup.py`` in the
     same parent directory).
 
-    Unless ``args.compile_only`` is set, performs the translation:
-    rotates backups of the output directory, copies the model there,
-    copies the bundled ``_mx_sys.pxd`` into it, runs the sample script
-    under tracing via :func:`run_sample`, and reads the spec file with
+    Unless ``args.compile_only`` is set, performs the translation.
+    First, before anything is written: reads the spec file with
     :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
     missing spec file re-raises :class:`FileNotFoundError` with a hint
-    to use ``--no-spec``).  Translation proper then runs in three
-    phases: (1) parse every model/space module and build its
-    :class:`~modelx_cython.builder.ModuleInfo` -- all space modules
+    to use ``--no-spec``) and validates its model-wide keys
+    (``compiler_directives``, ``use_libm``); parses every model/space
+    module of the model with
+    :class:`~modelx_cython.parser.ModuleVisitor`; and rejects the names
+    that cannot be compiled with
+    :func:`~modelx_cython.parser.check_reserved_names`.  Then runs the
+    sample script on the original model under tracing via
+    :func:`run_sample`.  Translation proper then runs
+    in three phases: (1) build the
+    :class:`~modelx_cython.builder.ModuleInfo` of every parsed module
+    -- all space modules
     are included even when the sample never exercised their cells
     (other modules may reference their classes in ``.pxd``
     declarations), while an ``_mx_model`` module is included only
     when traced, since the transformer does not handle the model
-    class; (2) statically analyze how array-returning cells are
+    class -- which also validates the per-cells spec entries; (2)
+    statically analyze how array-returning cells are
     consumed and apply the verdicts so unsafe memoryview return types
-    fall back to ``object``, and mark cells that are called with
+    fall back to ``object``, mark cells that are called with
     keyword arguments anywhere in the model so their public methods
-    stay plain Python methods (C-level calls are positional-only);
+    stay plain Python methods (C-level calls are positional-only),
+    type ``object`` the parameters a formula binds to values not
+    provably of their C types
+    (:func:`~modelx_cython.powers.demote_rebound_params`),
+    then, with every type final, reject the names Cython would read as
+    part of a C type (:func:`~modelx_cython.parser.check_type_words`);
+    only then, with every check passed, rotate the backups of the
+    output directory, copy the model there and copy the bundled
+    ``_mx_sys.pxd`` into it, so that a failed check leaves the
+    previous output in place;
     (3) rewrite each included module with
     :class:`~modelx_cython.transformer.ModuleTransformer`, write its
     ``.pxd`` and ``__init__.pxd`` files, and finally write the
-    generated ``setup.py`` via :func:`create_setup`.  Model sources
+    generated ``setup.py`` via :func:`create_setup`, with the spec's
+    compiler directives.  Model sources
     are read and written as UTF-8 regardless of locale.
 
     Unless ``args.translate_only`` is set, compiles the result with
@@ -263,6 +283,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     FileNotFoundError
         If translation is performed (``--compile-only`` not set), the
         spec file does not exist, and ``--no-spec`` was not given.
+    ValueError
+        If the spec is invalid, or, as
+        :class:`~modelx_cython.parser.ReservedNameError`, if a name in
+        the model cannot be compiled.
     """
 
     orig_path = pathlib.Path(args.model_path).resolve()
@@ -272,11 +296,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     setup_file = pathlib.Path(args.setup) if args.setup else work_dir / "setup.py"
 
     if not args.compile_only:
-        increment_backups(model_path)
-        shutil.copytree(orig_path, model_path)
-        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
-
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        # The spec and the names in the model are checked before the
+        # sample run, which can take long, so that a mistake in either
+        # fails at once.
         if args.no_spec:
             d = {}
         else:
@@ -286,17 +308,32 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
+        compiler_directives = spec.get_compiler_directives()
+        use_libm = spec.get_use_libm()
+
+        # Phase 0: parse all sources, and reject the names that cannot
+        # be declared in a .pxd file or compiled to C.  The sources are
+        # read from the model, before it is copied, under the module
+        # names of the copy.
+        visitors = {}
+        for m, src_path in iter_module_files(orig_path):
+            m = ".".join([model_name] + m.split(".")[1:])
+            source = src_path.read_text(encoding="utf-8")
+            visitors[m] = (source, ModuleVisitor(module=m, source=source))
+        check_reserved_names(v for _, v in visitors.values())
+
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
 
-        # Phase 1: parse all sources and build all module infos.
+        # Phase 1: build all module infos.
         # Every model/space module is translated, including those whose
         # cells the sample never exercised (e.g. enum-only spaces):
         # other modules may reference their classes in pxd declarations,
         # so their pxd files must exist.
         units = []
-        for m, src_path in iter_module_files(model_path):
+        for m, (source, visitor) in visitors.items():
             subs = m.split(".")
             assert subs.pop(0) == model_path.name
             assert subs[-1] in [MX_MODEL_MOD, MX_SPACE_MOD]
@@ -312,8 +349,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             rel_src_path = rel_model_path / "/".join(subs)
             abs_pxd_path = model_path / "/".join(pxd_path)
             abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
-            source = abs_src_path.read_text(encoding="utf-8")
-            visitor = ModuleVisitor(module=m, source=source)
             module_info = ModuleInfo(m, visitor, logger, spec)
             for cls in sorted(visitor.locked_classes):
                 if cls in module_info.classes:
@@ -340,14 +375,29 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                     if cells.name in kwarg_names:
                         cells.called_with_kwargs = True
                         _logger.info(
-                            f"{cells.fqname} stays a Python method because "
+                            f"{cells.method_fqname} stays a Python method because "
                             "a call with keyword arguments matches its name")
 
         # Every cells return type is final by now, so the operands of a
-        # '**' can be typed: see modelx_cython.powers.
+        # '**' can be typed: see modelx_cython.powers.  So can the values
+        # a formula binds to its parameters: a parameter bound to a value
+        # not provably of its C type is typed object in the formula.
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
+        demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
+        math_refs = build_math_refs(module_infos) if use_libm else None
+
+        # Every type is final by now: reject the names that Cython would
+        # read as part of the C type declared before them
+        check_type_words(u.module_info for u in units)
+
+        # Every check has passed: only now is the previous output rotated
+        # and the model copied, so that an error above leaves the
+        # previous output in place.
+        increment_backups(model_path)
+        shutil.copytree(orig_path, model_path)
+        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
         # Phase 3: transform and write out
         for u in units:
@@ -356,6 +406,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 resolver=resolver,
                 cells_kinds=cells_kinds,
                 ref_kinds=ref_kinds,
+                math_refs=math_refs,
             )
             pxd = PXDGenerator(u.module_info)
 
@@ -364,7 +415,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
-        create_setup(model_name, modules=modules, setup_file=setup_file)
+        create_setup(model_name, modules=modules, setup_file=setup_file,
+                     compiler_directives=compiler_directives)
 
     if args.translate_only:
         return 0
@@ -549,7 +601,8 @@ def main(argv: Sequence[str], stdout: IO[str], stderr: IO[str]) -> int:
     return main_handler(args, stdout, stderr)
 
 
-def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path):
+def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Path,
+                 compiler_directives: Optional[dict] = None):
     """Write a ``setup.py`` that cythonizes the translated modules.
 
     The generated script calls :func:`setuptools.setup` with
@@ -558,8 +611,9 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     the ``freethreading_compatible`` directive set so that importing the
     compiled model on a free-threaded build of Python does not re-enable
     the GIL (the directive needs Cython 3.1 or later and does nothing on
-    a build with the GIL).  Any existing file at ``setup_file`` is
-    overwritten.
+    a build with the GIL), followed by the ``compiler_directives`` of
+    the spec, which may also override ``freethreading_compatible``.  Any
+    existing file at ``setup_file`` is overwritten.
 
     Parameters
     ----------
@@ -572,11 +626,19 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
         into the script via its ``as_posix`` method.
     setup_file : pathlib.Path
         Path of the ``setup.py`` file to write.
+    compiler_directives : dict, optional
+        Further Cython compiler directives, as returned by
+        :meth:`~modelx_cython.config.TransSpec.get_compiler_directives`.
     """
 
     modules_str = textwrap.indent(",\n".join(
         ['"' + s.as_posix() + '"' for s in modules]
     ), " " * 8)
+
+    directives = {"freethreading_compatible": True}
+    directives.update(compiler_directives or {})
+    directives_str = "{" + ", ".join(
+        f"{json.dumps(k)}: {v!r}" for k, v in directives.items()) + "}"
 
     setup_script = textwrap.dedent("""\
     import sys
@@ -589,7 +651,7 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     {modules_str}
             ],
             annotate=True,
-            compiler_directives={{"freethreading_compatible": True}}
+            compiler_directives={directives_str}
         )
     )
     """)
@@ -597,7 +659,8 @@ def create_setup(model_name: str, modules: Sequence[str], setup_file: pathlib.Pa
     setup_file.write_text(
         setup_script.format(
             model_name=model_name,
-            modules_str=modules_str),
+            modules_str=modules_str,
+            directives_str=directives_str),
         encoding="utf-8")
 
 

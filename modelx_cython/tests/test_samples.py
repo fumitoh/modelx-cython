@@ -1,4 +1,5 @@
 import logging
+import re
 import sys
 import os
 import inspect
@@ -528,3 +529,230 @@ def test_size_spec_change(sample_dir, model, spec):
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_old.py")], env=env).returncode == 0
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_new.py")], env=env
                           ).returncode == (1 if spec == 'spec_old.py' else 0)
+
+def run_text(argv, env, **kwargs):
+    """subprocess.run capturing text output, decoded as UTF-8 whatever
+    the locale's encoding: a decoding error in the reader thread would
+    leave the captured output empty."""
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", **kwargs)
+
+
+@pytest.mark.parametrize("sample_dir, model", [["uncached_cells", "UncachedCells"]],
+                         indirect=["sample_dir"])
+def test_uncached_cells(sample_dir, model):
+    """Uncached cells are traced and typed like cached ones
+
+    An uncached cells has no ``_f_`` formula method: its public method is
+    the formula itself.  It is traced through that method, so it gets a
+    typed ``cpdef`` (without any cache) that compiled callers call at the
+    C level with C arguments.  The existing rules apply to it unchanged:
+    a cells called with keyword arguments or whose body has a closure
+    stays a Python method, an untraced one is ``object``, and arguments
+    of mixed integral and float types are ``object``.  ``float`` and
+    ``numpy.float64`` arguments are ``double``, and a cells returning an
+    array of strings is ``object``.
+
+    Typing must not break what compiled before: a parameter whose
+    default is not of its traced type, or that the formula binds to a
+    value not provably of it, is ``object`` (for a cached cells, in its
+    ``_f_`` formula only), and a real array that only callers outside
+    the model use is returned as the array.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--no-spec", "--log-level", "INFO"]
+
+    result = run_text(argv, env, cwd=work_dir)
+    assert result.returncode == 0, result.stderr
+    assert (
+        "varying types given to argument 'x' in "
+        "UncachedCells_nomx._mx_classes._c_Space1.mixed: int 1, float 2.5 "
+        "(typed object: integral and non-integral numbers)") in result.stderr
+    assert ("UncachedCells_nomx_cy._mx_classes._c_Space1.kw_called stays a "
+            "Python method") in result.stderr
+
+    pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+    for decl in [
+        "cpdef double scale(_c_Space1 self, double x)",
+        "cpdef long long step(_c_Space1 self, long long t)",
+        "cpdef bint positive(_c_Space1 self, long long x)",
+        "cpdef str label(_c_Space1 self, long long i)",
+        "cpdef double total(_c_Space1 self, long long t)",
+        "cpdef double no_arg(_c_Space1 self)",
+        "cpdef long long with_default(_c_Space1 self, long long t, long long k=*)",
+        # untraced, and an int/float argument mix
+        "cpdef object never_called(_c_Space1 self, object x)",
+        "cpdef double mixed(_c_Space1 self, object x)",
+        # float and numpy.float64 arguments
+        "cpdef double floats(_c_Space1 self, double x)",
+        # arrays of strings, uncached and cached
+        "cpdef object labels_u(_c_Space1 self, long long n)",
+        "cpdef object labels(_c_Space1 self)",
+        "cdef object _v_labels",
+        # a real array used only through element access
+        "cpdef const double[:] arr(_c_Space1 self, long long n)",
+        # a real array used only outside the model: the array itself
+        "cpdef object arr_ext(_c_Space1 self, long long n)",
+        # a default that does not fit the traced type: object
+        "cpdef double dflt_none(_c_Space1 self, double x, object y=*)",
+        "cpdef long long dflt_float(_c_Space1 self, long long x, object k=*)",
+        "cdef long long _f_c_dflt(_c_Space1 self, long long t, object k=*)",
+        "cpdef long long c_dflt(_c_Space1 self, long long t, object k=*)",
+        "cdef dict _v_c_dflt",
+        # a parameter bound to a value not provably of its type: object
+        "cpdef double rebind_div(_c_Space1 self, object rate)",
+        "cpdef long long rebind_max(_c_Space1 self, object t)",
+        # ... in the formula only, for a cached cells, whose cache keeps
+        # its C array
+        "cdef double _f_c_rebind(_c_Space1 self, object t)",
+        "cpdef double c_rebind(_c_Space1 self, long long t)",
+        # bound to values of its type: typed
+        "cpdef long long rebind_int(_c_Space1 self, long long t)",
+        "cdef double _f_c_rebind_ok(_c_Space1 self, long long t)",
+    ]:
+        assert decl + "\n" in pxd, decl
+    assert re.search(r"cdef double\[\d+\] _v_c_rebind\n", pxd)
+    cls = "UncachedCells_nomx_cy._mx_classes._c_Space1"
+    for msg in [
+        f"parameter 'k' of {cls}.dflt_float is typed object rather than "
+        "long long: its default value 0.5 is not a long long literal",
+        f"parameter 'rate' of {cls}.rebind_div is typed object rather than "
+        "long long: the formula binds it to rate / 100, which is not "
+        "provably a long long",
+        f"parameter 't' of {cls}._f_c_rebind is typed object in the formula "
+        "rather than long long",
+    ]:
+        assert msg in result.stderr, msg
+    # no cache, no formula method for an uncached cells
+    for name in ["scale", "step", "total", "kw_called", "gen_sum"]:
+        assert f"_v_{name}" not in pxd and f"_f_{name}" not in pxd
+    # kw_called is called with a keyword, and gen_sum has a closure
+    assert " kw_called(" not in pxd and " gen_sum(" not in pxd
+
+    src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
+        encoding="utf-8")
+    assert ("    @_mx_cy.ccall\n"
+            "    def scale(self, x: _mx_cy.double) -> _mx_cy.double:\n"
+            "        return x * 2.0\n") in src
+    assert "    def kw_called(self, x: _mx_cy.longlong) -> _mx_cy.longlong:\n" in src
+
+    # compiled callers call the uncached cells through the vtable, with C
+    # arguments, rather than through a Python attribute lookup
+    c_src = (work_dir / (model + "_nomx_cy") / "_mx_classes.c").read_text(
+        encoding="utf-8")
+    for name in ["scale", "step", "total", "positive"]:
+        assert re.search(rf"->{name}\(__pyx_v_self, ", c_src), name
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")], env=env
+    ).returncode == 0
+
+
+@pytest.mark.parametrize("sample_dir, model", [["reserved_names", "ReservedNames"]],
+                         indirect=["sample_dir"])
+def test_reserved_names(sample_dir, model):
+    """Names Cython or the C compiler cannot take fail before the sample run
+
+    Each would otherwise make an invalid .pxd file or C code that fails
+    to compile, after the sample run; mx2cy rejects them all at once,
+    naming each, and leaves no translated copy behind.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"), "--no-spec"]
+    result = run_text(argv, env, cwd=work_dir)
+    assert result.returncode != 0
+    err = result.stderr
+    assert "ReservedNameError: mx2cy cannot compile these names" in err
+    assert ("Space1: parameter of cells 'total' 'include' is a reserved "
+            "word of Cython") in err
+    assert "Space1: child space 'cdef' is a reserved word of Cython" in err
+    assert "Space1: reference 'NULL' is a macro of the C headers" in err
+    assert "Space1: cells 'errno' is a macro of the C headers" in err
+    assert ("Space1: cells 'isnan' is a function-like macro of the C headers "
+            "the compiled module includes, and it is called") in err
+    assert not (work_dir / "sample_ran.txt").exists()
+    assert not (work_dir / (model + "_nomx_cy")).exists()
+
+
+@pytest.mark.parametrize("sample_dir, model", [["spec_options", "SpecOptions"]],
+                         indirect=["sample_dir"])
+def test_spec_options(sample_dir, model):
+    """The spec keys compiler_directives, use_libm and param_type
+
+    ``compiler_directives`` reaches cythonize in setup.py, ``param_type``
+    overrides a traced parameter type, and ``use_libm`` compiles the
+    math.exp/log/pow calls on C numbers to the C library, with every
+    value and every error what the math module gives, also where a
+    ``**`` and a math call are applied to each other.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+    base = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py")]
+
+    # invalid specs fail before anything is translated, and, whether
+    # they fail before the sample run or after it, before the output
+    # directory is rotated or written
+    for spec, msg in [
+        ("spec_bad_param.py", "has no parameter named 'x'"),
+        ("spec_bad_return.py", "invalid value for spec 'return_type': double"),
+        ("spec_bad_directive.py", "'infer_type' is not a Cython compiler directive"),
+        ("spec_bad_cpow.py",
+         "mx2cy does not support the Cython directive cpow=True"),
+    ]:
+        result = run_text(base + ["--spec", str(work_dir / spec), "--translate-only"],
+                          env, cwd=work_dir)
+        assert result.returncode != 0 and msg in result.stderr, result.stderr
+        assert not (work_dir / (model + "_nomx_cy")).exists()
+        assert not (work_dir / (model + "_nomx_cy_BAK1")).exists()
+
+    # without use_libm, the math calls stay Python calls
+    result = run_text(base + ["--spec", str(work_dir / "spec_no_libm.py"),
+                              "--translate-only"], env, cwd=work_dir)
+    assert result.returncode == 0, result.stderr
+    src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
+        encoding="utf-8")
+    assert "_mx_exp(" not in src and "self.math.exp(" in src
+    assert ('compiler_directives={"freethreading_compatible": True}'
+            in (work_dir / "setup.py").read_text(encoding="utf-8"))
+
+    result = run_text(base + ["--spec", str(work_dir / "spec.py"),
+                              "--log-level", "INFO"], env, cwd=work_dir)
+    assert result.returncode == 0, result.stderr
+
+    setup = (work_dir / "setup.py").read_text(encoding="utf-8")
+    assert ('compiler_directives={"freethreading_compatible": True, '
+            '"infer_types": True}') in setup
+
+    pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+    # param_type: t is traced as an int, typed double by the spec, so the
+    # cells is no longer cached in a C array
+    assert "cdef double _f_typed(_c_Space1 self, double t)\n" in pxd
+    assert "cdef dict _v_typed\n" in pxd
+
+    src = (work_dir / (model + "_nomx_cy") / "_mx_classes.py").read_text(
+        encoding="utf-8")
+    assert "return _mx_sys._mx_exp(-self.rate() * t)" in src
+    assert "return _mx_sys._mx_log(x)" in src
+    assert "return _mx_sys._mx_math_pow(x, y)" in src
+    assert "return _mx_sys._mx_exp(x)" in src
+    # two arguments: left as exported, and logged
+    assert "return self.math.log(x, 2.0)" in src
+    assert "math call left as exported in" in result.stderr
+    # a '**' on a math call that becomes a C double is rewritten too, or
+    # it would go on Cython's complex path, which max() cannot compare;
+    # and a math call on a rewritten '**' is rewritten
+    assert ("return max(_mx_sys._mx_pow(_mx_sys._mx_exp(x), 0.5), 1.0)"
+            in src)
+    assert "return _mx_sys._mx_exp(_mx_sys._mx_pow(x, 2.0))" in src
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")], env=env
+    ).returncode == 0

@@ -583,6 +583,6 @@ def apply_verdicts(units, verdicts: Mapping[str, UsageVerdict]) -> None:
                     cells.usage = verdict
                     if not verdict.only_element_access:
                         _logger.info(
-                            f"return type of {cells.fqname} falls back to "
+                            f"return type of {cells.formula_fqname} falls back to "
                             "object: " + "; ".join(verdict.unsafe_sites[:3])
                         )

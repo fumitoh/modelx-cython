@@ -43,7 +43,10 @@ except ImportError:  # Python -3.9
 
 from functools import cached_property
 
-from modelx_cython.typedefs import get_type_expr
+import libcst as cst
+
+from modelx_cython.typedefs import (
+    get_type_expr, CY_BOOL_T, CY_FLOAT_T, CY_INT_T)
 from modelx_cython.config import TransSpec
 from modelx_cython.tracer import RuntimeCellsInfo, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
@@ -70,6 +73,49 @@ array-returning cells, ``True`` keeps the const-memoryview return type
 and ``False`` falls back to ``object``.  Consulted by
 :attr:`CombinedCellsInfo.use_memoryview`.
 """
+
+
+def _unsigned(expr: cst.BaseExpression) -> cst.BaseExpression:
+    """``expr`` without its unary plus and minus signs."""
+    while (isinstance(expr, cst.UnaryOperation)
+           and isinstance(expr.operator, (cst.Plus, cst.Minus))):
+        expr = expr.expression
+    return expr
+
+
+def _is_str_literal(expr: cst.BaseExpression) -> bool:
+    """Whether ``expr`` is a ``str`` literal: not bytes, not an
+    f-string."""
+    if isinstance(expr, cst.SimpleString):
+        return "b" not in expr.prefix.lower()
+    if isinstance(expr, cst.ConcatenatedString):
+        return _is_str_literal(expr.left) and _is_str_literal(expr.right)
+    return False
+
+
+def default_fits(default: cst.BaseExpression, ctype: str) -> bool:
+    """Whether a parameter default can be declared with C type ``ctype``.
+
+    Only a literal of the type fits a C type: an integer literal, with
+    an optional sign, a ``long long``; an integer or float literal a
+    ``double``; ``True`` or ``False`` a ``bint``; and a string literal
+    or ``None`` a ``str``.  Anything fits ``object``.  This is stricter
+    than Cython, which also takes, for example, ``True`` for a ``long
+    long`` or a bytes literal for a ``double``, so that the compiled
+    default is the exported one.
+    """
+    if ctype == CY_INT_T:
+        return isinstance(_unsigned(default), cst.Integer)
+    elif ctype == CY_FLOAT_T:
+        return isinstance(_unsigned(default), (cst.Integer, cst.Float))
+    elif ctype == CY_BOOL_T:
+        return (isinstance(default, cst.Name)
+                and default.value in ("True", "False"))
+    elif ctype == "str":
+        return (_is_str_literal(default)
+                or (isinstance(default, cst.Name) and default.value == "None"))
+    else:
+        return ctype == "object"
 
 
 class CombinedCellsInfo(LexicalCellsInfo):
@@ -99,6 +145,25 @@ class CombinedCellsInfo(LexicalCellsInfo):
         Value of the spec key ``"return_type"``, or ``""`` if absent.
     _force_memoryview : bool
         True when the spec sets ``"return_type": "memoryview"``.
+    _spec_param_t : dict
+        Value of the spec key ``"param_type"``: parameter names mapped
+        to type names of :data:`~modelx_cython.typedefs.str_to_type`
+        that override the traced parameter types.  Empty if absent.
+    param_rebinds : dict
+        What the formula binds again to each parameter it rebinds, as
+        collected by :func:`~modelx_cython.parser.collect_param_rebinds`
+        from the ``_f_`` method, or from the public method of an
+        uncached cells.  Empty when constructed without a
+        :class:`ClassInfo`.
+    _object_params : dict
+        Parameters typed ``object`` whatever their traced or spec type,
+        mapped to the reason: the signature and the formula both take
+        them as Python objects.
+    _formula_object_params : dict
+        Parameters typed ``object`` in the ``_f_`` formula only, mapped
+        to the reason; the public method of the cached cells, and with
+        it the cache, keeps their type.  See
+        :meth:`demote_rebound_param`.
     called_with_kwargs : bool
         True if a call with keyword arguments anywhere in the model
         names a function matching this cells' name.  Cython C-level
@@ -127,7 +192,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         If the spec requests ``"return_type": "memoryview"`` but the
         traced return value is not a real-valued numpy array with at
         least one dimension.  If no type information was sampled at
-        all, the request is ignored with a warning instead.
+        all, the request is ignored with a warning instead.  Also if
+        the spec's ``"param_type"`` is not a dict, names a parameter
+        the cells does not have, or gives a type name not in
+        :data:`~modelx_cython.typedefs.str_to_type`.
     """
 
     parent: 'ClassInfo'
@@ -145,7 +213,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         super().__init__(
             lx_info.module, lx_info.cls, lx_info.name, lx_info.params,
-            lx_info.params_with_defaults
+            lx_info.params_with_defaults,
+            getattr(lx_info, "param_defaults", None),
         )
         self.parent = cls_info
         visitor = getattr(cls_info, "visitor", None)
@@ -165,14 +234,25 @@ class CombinedCellsInfo(LexicalCellsInfo):
             self.formula_is_generator = (
                 FORMULA_PREF + lx_info.name
                 in visitor.generator_funcs.get(lx_info.cls, ()))
+            formula = (FORMULA_PREF + lx_info.name if self.has_formula_def
+                       else lx_info.name)
+            self.param_rebinds = getattr(visitor, "param_rebinds", {}).get(
+                lx_info.cls, {}).get(formula, {})
         else:   # constructed without a ClassInfo (tests)
             self.has_formula_def = True
             self.formula_is_generator = False
             self.body_has_closure = False
+            self.param_rebinds = {}
         self._rt = rt_info
         self._spec = spec
         self._spec_ret_t = spec.get(TransSpec.RET_T, "")
         self._force_memoryview = self._spec_ret_t == TransSpec.RET_MEMORYVIEW
+        self._spec_param_t = self._init_spec_param_t(
+            spec.get(TransSpec.PARAM_T, {}))
+        self._object_params = {}
+        self._formula_object_params = {}
+        if self.has_typeinfo():
+            self._check_param_defaults()
         if self._force_memoryview:
             if self.has_typeinfo():
                 if not (self.is_array_returned and self.is_real_value
@@ -180,13 +260,150 @@ class CombinedCellsInfo(LexicalCellsInfo):
                     raise ValueError(
                         f"invalid value for spec '{TransSpec.RET_T}': "
                         f"'{TransSpec.RET_MEMORYVIEW}' requires a real-valued "
-                        f"numpy array return, but '{self.fqname}' does not "
+                        f"numpy array return, but '{self.formula_fqname}' does not "
                         "return one")
             else:
                 _logger.warning(
                     f"spec '{TransSpec.RET_T}': '{TransSpec.RET_MEMORYVIEW}' "
-                    f"for '{self.fqname}' is ignored because no type "
+                    f"for '{self.formula_fqname}' is ignored because no type "
                     "information was sampled")
+
+    def _init_spec_param_t(self, param_t) -> Dict[str, type]:
+        """Validate the spec's ``"param_type"`` and map it to types.
+
+        Like a spec return type, it takes effect only when the sample
+        run produced type information for the cells; otherwise it is
+        ignored with a warning, and the parameters stay ``object``.
+        """
+        key = TransSpec.PARAM_T
+        if not isinstance(param_t, dict):
+            raise ValueError(
+                f"invalid value for spec '{key}' of '{self.formula_fqname}': "
+                f"expected a dict of parameter names to type names, "
+                f"got {param_t!r}")
+        result = {}
+        for param, type_name in param_t.items():
+            if param not in self.params:
+                raise ValueError(
+                    f"invalid spec '{key}' for '{self.formula_fqname}': it has no "
+                    f"parameter named {param!r} (parameters: "
+                    f"{', '.join(self.params) or 'none'})")
+            if type_name not in str_to_type:
+                raise ValueError(
+                    f"invalid spec '{key}' for parameter {param!r} of "
+                    f"'{self.formula_fqname}': {type_name!r} is not one of "
+                    f"{', '.join(repr(k) for k in str_to_type)}")
+            result[param] = str_to_type[type_name]
+        if result and not self.has_typeinfo():
+            _logger.warning(
+                f"spec '{key}' for '{self.formula_fqname}' is ignored because no "
+                "type information was sampled")
+        return result
+
+    def _given_arg_type(self, arg: str) -> type:
+        """Type of parameter ``arg`` before any fallback: from the
+        spec's ``"param_type"`` if it names ``arg``, otherwise as
+        traced."""
+        if arg in self._spec_param_t:
+            return self._spec_param_t[arg]
+        assert arg in self._rt.arg_types
+        return self._rt.arg_types[arg]
+
+    def arg_type(self, arg: str, formula=False) -> type:
+        """Type of parameter ``arg``: from the spec's
+        ``"param_type"`` if it names ``arg``, otherwise as traced,
+        unless it falls back to ``object`` because its default value
+        or, in the formula, a value bound to it is not of that type
+        (see :meth:`_check_param_defaults` and
+        :meth:`demote_rebound_param`).
+
+        Requires type information.
+
+        Parameters
+        ----------
+        arg : str
+            Parameter name.
+        formula : bool, default False
+            True for the type in the method that holds the formula:
+            the ``_f_`` method of a cached cells, or the public method
+            of an uncached one.  False for the type in the public
+            method, which also sizes the cache.
+        """
+        assert self.has_typeinfo()
+        if arg in self._object_params:
+            return object
+        if formula and arg in self._formula_object_params:
+            return object
+        return self._given_arg_type(arg)
+
+    @property
+    def formula_fqname(self) -> str:
+        """Fully-qualified name of the method that holds the formula:
+        :attr:`fqname` (``..._f_<name>``) for a cached cells or a
+        special method, :attr:`method_fqname` for an uncached cells,
+        which has no ``_f_`` method."""
+        if self.has_formula_def or self.is_special():
+            return self.fqname
+        return self.method_fqname
+
+    def _object_param(self, arg, reason, formula_only=False):
+        """Type parameter ``arg`` ``object``, logging ``reason``: in the
+        formula only if ``formula_only``, else everywhere."""
+        given = get_type_expr(self._given_arg_type(arg), c_style=True)
+        target = (self._formula_object_params if formula_only
+                  else self._object_params)
+        target[arg] = reason
+        # is_int_args is cached and depends on the parameter types
+        self.__dict__.pop("is_int_args", None)
+        if formula_only:
+            where, method = " in the formula", self.formula_fqname
+        else:
+            where, method = "", self.method_fqname
+        if arg in self._spec_param_t:
+            _logger.warning(
+                f"spec '{TransSpec.PARAM_T}' for parameter '{arg}' of "
+                f"{method} is not applied{where}, and the parameter is "
+                f"typed object: {reason}")
+        else:
+            _logger.info(
+                f"parameter '{arg}' of {method} is typed object{where} "
+                f"rather than {given}: {reason}")
+
+    def _check_param_defaults(self):
+        """Type ``object`` the parameters whose default value does not
+        fit their C type.
+
+        Cython rejects a C-typed parameter whose default is not of its
+        type: ``None`` for a ``double`` ("Signature not compatible with
+        previous declaration"), ``0.5`` for a ``long long`` ("Cannot
+        assign type 'double' to 'long long'").  A default is taken to
+        fit only when it is a literal of the type: an integer literal,
+        with an optional sign, for ``long long``; an integer or float
+        literal for ``double``; ``True`` or ``False`` for ``bint``; a
+        string literal or ``None`` for ``str``.  Any default fits an
+        ``object`` parameter.
+        """
+        for arg, default in self.param_defaults.items():
+            if arg not in self.params:
+                continue
+            ctype = get_type_expr(self._given_arg_type(arg), c_style=True)
+            if not default_fits(default, ctype):
+                code = cst.Module([]).code_for_node(default).strip()
+                self._object_param(
+                    arg, f"its default value {code} is not a {ctype} literal")
+
+    def demote_rebound_param(self, arg: str, reason: str) -> None:
+        """Type ``object`` a parameter that the formula binds to a value
+        not provably of its C type.
+
+        For a cached cells only the ``_f_`` formula, where the binding
+        is, takes the parameter as a Python object: the public method,
+        which looks up the cache, keeps the C type, and so does the
+        cache.  For an uncached cells the public method is the formula,
+        so the parameter is ``object`` there.  Called by
+        :func:`modelx_cython.powers.demote_rebound_params`.
+        """
+        self._object_param(arg, reason, formula_only=self.has_formula_def)
 
     @cached_property
     def norm_type(self) -> type:
@@ -295,9 +512,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
         * ``False`` when usage analysis could not prove that every
           model-internal use is scalar element access (including
           unresolvable calls that merely share the cells' name);
-        * :data:`MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS` when the value
-          is consumed only by element access but no call site exists
-          inside the model;
+        * when no call site exists inside the model,
+          :data:`MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS` for a cached
+          cells, and ``False`` for an uncached cells, which returned
+          the array itself before uncached cells were typed, and whose
+          memoryview would serve no compiled caller;
         * ``True`` otherwise (element access only, with internal
           uses).
         """
@@ -310,11 +529,15 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if not self.usage.only_element_access:
             return False
         if not self.usage.has_internal_uses:
-            return MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS
+            return self.has_formula_def and MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS
         return True
 
-    def get_argtype_expr(self, arg: str, c_style=False) -> str:
+    def get_argtype_expr(self, arg: str, c_style=False, formula=False) -> str:
         """Return the Cython type expression for a parameter.
+
+        The type is the one the spec's ``"param_type"`` gives, if it
+        names the parameter, or else the traced one, unless it falls
+        back to ``object`` (see :meth:`arg_type`).
 
         Parameters
         ----------
@@ -325,6 +548,9 @@ class CombinedCellsInfo(LexicalCellsInfo):
             If True, emit a C-style type (e.g. ``long long``) for .pxd
             files; otherwise a pure-Python-mode expression
             (e.g. ``_mx_cy.longlong``).
+        formula : bool, default False
+            True for the type in the method that holds the formula
+            (see :meth:`arg_type`).
 
         Returns
         -------
@@ -333,8 +559,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
             information was sampled.
         """
         if self.has_typeinfo():
-            assert arg in self._rt.arg_types
-            return get_type_expr(self._rt.arg_types[arg], c_style=c_style)
+            return get_type_expr(self.arg_type(arg, formula=formula),
+                                 c_style=c_style)
         else:
             return "object"
 
@@ -347,8 +573,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
         that read-only arrays, such as those returned by pandas under
         copy-on-write, can be coerced; when :attr:`use_memoryview` is
         False the expression falls back to ``"object"`` instead.
-        Non-array returns use the expression for :attr:`norm_type`,
-        and cells without type information yield ``"object"``.
+        Every other array return is ``"object"``: an array of strings,
+        booleans or Python objects is neither its element type nor a
+        numeric memoryview.  Non-array returns use the expression for
+        :attr:`norm_type`, and cells without type information yield
+        ``"object"``.
 
         Parameters
         ----------
@@ -358,8 +587,13 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
-            if self.is_real_value and self.is_array_returned:
-                if not self.use_memoryview:
+            if self.is_array_returned:
+                # A str array is not a str, a bool array does not coerce
+                # to a bint memoryview (its buffer format is '?'), and a
+                # 0-d array has no memoryview type
+                if (not self.is_real_value or self.norm_type is bool
+                        or self._rt.ret_type.ndim < 1
+                        or not self.use_memoryview):
                     return "object"
                 # const element type so that read-only arrays, such as those
                 # returned by pandas under copy-on-write, can be coerced
@@ -374,11 +608,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
             return "object"
 
     def is_arg_int(self, arg: str):
-        """Return True if the sampled type of parameter ``arg`` is
-        integral.
+        """Return True if the type of parameter ``arg`` (see
+        :meth:`arg_type`) is integral.
         """
         assert self.has_args() and self.has_typeinfo()
-        return issubclass(self._rt.arg_types[arg], numbers.Integral)
+        return issubclass(self.arg_type(arg), numbers.Integral)
 
     @cached_property
     def is_int_args(self):
@@ -399,11 +633,16 @@ class CombinedCellsInfo(LexicalCellsInfo):
         array.
 
         A cells is arrayable when all its parameters are integral and
-        it returns a real-valued scalar (not an array).  Requires
-        parameters and type information.
+        it returns a real-valued scalar (not an array).  A parameter
+        that the spec's ``"param_type"`` makes integral but that was
+        not traced as one has no observed maximum to size the array
+        with, so its cells is not arrayable.  Requires parameters and
+        type information.
         """
         assert self.has_args() and self.has_typeinfo()
-        if self.is_int_args and self.is_real_value and not self.is_array_returned:
+        if (self.is_int_args and self.is_real_value
+                and not self.is_array_returned
+                and all(p in self._rt.max_args for p in self.params)):
             return True
         else:
             return False
@@ -464,6 +703,9 @@ class CombinedRefInfo:
         refs.
     is_relative : bool
         True when ``decl_type_expr`` is relative to ``module``.
+    module_name : str
+        The ``__name__`` of the sampled value when it is a module
+        (``"math"`` for a reference to the math module), else ``''``.
     """
 
     module: str
@@ -473,6 +715,7 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
+    module_name: str = ''
 
     def __init__(self, module,
                  cls,
@@ -506,6 +749,7 @@ class CombinedRefInfo:
             self.mx_class = rt_info.mx_class
             self.decl_type_expr = decl_type_expr
             self.is_relative = is_relative
+            self.module_name = getattr(rt_info, "module_name", "")
         else:
             self.module = module
             self.cls = cls
@@ -604,14 +848,20 @@ class ClassInfo:
         maximum argument values observed per parameter tuple.
         """
         # .get: model classes and container-only spaces have no cells
+        formula_defs = self.visitor.formula_defs.get(self.name, ())
         for name, lx_info in self.visitor.cells_info.get(self.name, {}).items():
-            rt_info = self.logger.cells_info.get(lx_info.fqname, None)
+            # An uncached cells has no _f_ method: its public method is
+            # the formula and is what the tracer recorded.  It has no
+            # cache either, so its arguments do not size any cache array.
+            uncached = not lx_info.is_special() and name not in formula_defs
+            trace_name = lx_info.method_fqname if uncached else lx_info.fqname
+            rt_info = self.logger.cells_info.get(trace_name, None)
             self.cells[name] = CombinedCellsInfo(
                 self,
                 lx_info, rt_info,
                 self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS, {}).get(name, {})
             )
-            if rt_info:
+            if rt_info and not uncached:
                 args = tuple(rt_info.max_args)
                 maxes = tuple(rt_info.max_args.values())
                 if args not in self._cells_max_args:
