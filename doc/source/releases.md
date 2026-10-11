@@ -1,5 +1,19 @@
 # Release Notes
 
+## Unreleased
+
+### Type inference
+
+* An argument given both `float` and `numpy.float64` values is now typed
+  `double`, as a return value of that mixture already was, instead of
+  `object`.  Integers mixed with floats stay `object`, and so do floats
+  mixed with another real type, such as `numpy.float32` or
+  `fractions.Fraction`, whose arithmetic is not a double's.  Every
+  argument that falls back to `object` is now logged at `INFO` level;
+  before, only integer mixtures were.
+
+See {doc}`architecture`.
+
 ## v0.1.0 (5 September 2026)
 
 This release supports the two export options that

@@ -80,6 +80,23 @@ if (3, 12) <= sys.version_info < (3, 14):
 
 _logger = logging.getLogger(__name__)
 
+_MAX_VALUE_REPR = 40
+
+
+def _describe_types(type_val: Mapping[type, Any]) -> str:
+    """``"int 1, float 2.0"``: each observed type with one value of it.
+
+    Long or multi-line values (arrays, DataFrames) are shortened, so
+    that a log line stays one line.
+    """
+    def short(val):
+        text = " ".join(str(val).split())
+        if len(text) > _MAX_VALUE_REPR:
+            text = text[:_MAX_VALUE_REPR - 3] + "..."
+        return text
+
+    return ', '.join(k.__name__ + " " + short(v) for k, v in type_val.items())
+
 
 @dataclass
 class ReturnTypeInfo:
@@ -109,10 +126,11 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     traced method (normally a cells formula method, ``_f_*``).  Argument types are merged across traces:
     a single observed type is kept as-is; multiple integral types widen
     to :class:`numbers.Integral`; multiple ``str`` subclasses collapse
-    to ``str``; any other mixture falls back to ``object`` (logging a
-    message when integral and non-integral values are mixed).  For
-    integral arguments, the largest observed value is recorded in
-    ``max_args``.
+    to ``str``; ``float`` and its subclasses (``numpy.float64``) widen
+    to :class:`numbers.Real`; any other mixture, integers with floats
+    and floats with ``numpy.float32`` included, falls back to
+    ``object``, and each such fallback is logged.  For integral arguments, the
+    largest observed value is recorded in ``max_args``.
 
     Return types are merged pairwise across traces: equal types are
     kept; arrays of equal ``ndim`` have their element types widened to
@@ -172,7 +190,19 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         return bool(len(self.arg_types))
 
     def _init_arg_types(self, traces):
-        """Merge observed argument types into arg_types and max_args."""
+        """Merge observed argument types into arg_types and max_args.
+
+        Per argument: one observed type is kept as is; integral types
+        only widen to :class:`numbers.Integral`; ``str`` subclasses
+        only collapse to ``str``; ``float`` and its subclasses only
+        (e.g. ``float`` and ``numpy.float64``, both C doubles) widen to
+        :class:`numbers.Real`.  Any other mixture, notably integers
+        mixed with floats, or floats mixed with another real type such
+        as ``numpy.float32`` or ``fractions.Fraction`` whose arithmetic
+        is not that of a double, falls back to ``object``, and every
+        such fallback is logged at INFO with one value of each observed
+        type.
+        """
         arg_type_val: Dict[str, dict[type, Any]] = {}
 
         for trace in traces:
@@ -203,11 +233,31 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             elif all(issubclass(tp, str) for tp in type_val.keys()):
                 self.arg_types[arg] = str
 
+            elif all(issubclass(tp, float) for tp in type_val.keys()):
+                # float and its subclasses, such as numpy.float64, are C
+                # doubles, so the argument is typed double.  Other real
+                # types, such as numpy.float32, numpy.longdouble or
+                # fractions.Fraction, compute differently from a double.
+                self.arg_types[arg] = numbers.Real
+                _logger.debug(
+                    f"floating types given to argument '{arg}' in "
+                    f"{self.fqname} are typed double: "
+                    f"{_describe_types(type_val)}")
+
             else:
                 if (any(issubclass(tp, numbers.Integral) for tp in type_val.keys()) and
-                        any(not issubclass(tp, numbers.Integral) for tp in type_val.keys())):
-                    msg = ', '.join(k.__name__ + " " + str(v) for k, v in type_val.items())
-                    _logger.info(f"varying types given to argument '{arg}' in {self.fqname}: {msg}")
+                        all(issubclass(tp, numbers.Real) for tp in type_val.keys())):
+                    # Typing double would turn integers into floats, and
+                    # typing long long would truncate the floats
+                    reason = "typed object: integral and non-integral numbers"
+                elif all(issubclass(tp, numbers.Real) for tp in type_val.keys()):
+                    reason = ("typed object: real types that are not all "
+                              "float")
+                else:
+                    reason = "typed object"
+                _logger.info(
+                    f"varying types given to argument '{arg}' in "
+                    f"{self.fqname}: {_describe_types(type_val)} ({reason})")
 
                 self.arg_types[arg] = object
 

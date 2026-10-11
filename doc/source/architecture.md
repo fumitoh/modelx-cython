@@ -121,9 +121,14 @@ The runtime type summaries follow a few widening rules, implemented in
   integer, and mixing integer and float returns widens to real; anything
   else falls back to `object`.
 * An argument observed with several integer types widens to a common
-  integer, and one observed with several `str` types collapses to `str`;
-  any other mixture — including integers mixed with floats — falls back
-  to `object`.
+  integer, one observed with several `str` types collapses to `str`, and
+  one observed with `float` and its subclasses only — `float` and
+  `numpy.float64`, both C doubles — widens to `double`; any other
+  mixture — including integers mixed with floats, where `double` would
+  turn the integers into floats and `long long` would truncate the
+  floats, and floats mixed with `numpy.float32`, `numpy.longdouble` or
+  `fractions.Fraction`, whose arithmetic is not a double's — falls back
+  to `object`, and is logged.
 * NumPy array returns keep their dtype and dimension count; when the
   dtype varies between calls the element type widens by the same rules
   as scalar returns.  Dtypes that cannot be widened, arrays whose ndim

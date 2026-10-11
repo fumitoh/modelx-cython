@@ -317,6 +317,50 @@ def test_varying_integral_arg_types(sample_dir, model):
     assert "cdef long long[3] _v_foo" in (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
 
 
+@pytest.mark.parametrize("sample_dir, model", [["varying_float_types_of_args", "VaryingFloatArgTypes"]],
+                         indirect=["sample_dir"])
+def test_varying_float_arg_types(sample_dir, model):
+    """float and numpy.float64 numbers given to the same arg are double
+
+    Other mixtures stay object and are logged: int with float, where
+    double would turn the integers into floats, and float with
+    numpy.float32, whose arithmetic is not a double's.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--no-spec", "--log-level", "INFO"]
+
+    result = subprocess.run(argv, env=env, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace")
+    assert result.returncode == 0, result.stderr
+    cls = "VaryingFloatArgTypes_nomx._mx_classes._c_Space1"
+    for msg in [
+        f"varying types given to argument 'x' in {cls}._f_mixed: "
+        "int 1, float 2.5 (typed object: integral and non-integral numbers)",
+        f"varying types given to argument 'x' in {cls}._f_f32mixed: "
+        "float 1.5, float32 0.1 (typed object: real types that are not all "
+        "float)",
+    ]:
+        assert msg in result.stderr, msg
+    assert f"argument 'x' in {cls}._f_floats" not in result.stderr
+
+    pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+    for decl in [
+        "cpdef double floats(_c_Space1 self, double x)",
+        "cpdef double mixed(_c_Space1 self, object x)",
+        "cpdef double f32mixed(_c_Space1 self, object x)",
+    ]:
+        assert decl + "\n" in pxd, decl
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")],
+        env=env
+    ).returncode == 0
+
+
 @pytest.mark.parametrize("sample_dir, model, spec", [["deep_recursion", "DeepRecursion", ""],
                                                ["index_range", "IndexRange", "--no-spec"]],
                          indirect=["sample_dir"])
