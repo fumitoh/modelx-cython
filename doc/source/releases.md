@@ -1,5 +1,27 @@
 # Release Notes
 
+## Unreleased
+
+### Names that cannot be compiled
+
+A cells, parameter, reference, space parameter or child space named with
+a Cython reserved word (such as a parameter named `include`), a C macro
+of the headers the compiled module includes (such as `NULL`, `errno` or
+`INT_MAX`), or a C type word that follows a C type (such as a `long long`
+parameter named `long`) used to produce an invalid `.pxd` file or C code
+that failed to compile.  `mx2cy` now rejects such names with an error
+that lists each, with its space and the reason, before the sample run
+where the type does not matter.  The names are rejected rather than
+renamed, because code using the compiled model reaches its cells and
+references by name.
+
+The previous output directory is now rotated to `_BAK1`, and the model
+copied, only after every check has passed, including those that need
+the sample run, such as an invalid `return_type` in the spec: a failed
+check leaves the previous output as it was.
+
+See {doc}`architecture`.
+
 ## v0.1.0 (5 September 2026)
 
 This release supports the two export options that

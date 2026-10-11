@@ -27,6 +27,7 @@ builder later combines with runtime trace information to produce the
 typing information used by the Cython transformer.
 """
 
+import sys
 from abc import ABC, abstractmethod
 from typing import Union, Sequence, Mapping
 
@@ -43,8 +44,10 @@ from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, Clas
 from modelx_cython.consts import (
     FORMULA_PREF,
     GLOBAL_PREF,
+    MODULE_PREF,
     SPACE_PREF,
     MX_SELF,
+    MX_SPACE_MOD,
     MX_ASSIGN_REFS,
     MX_LOCK,
     is_user_defined,
@@ -238,6 +241,9 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         Names of functions/methods called with keyword arguments
         anywhere in the module, collected after the visit by
         :meth:`_collect_kwarg_called_names`.
+    attr_called_names : set of str
+        Names of the methods called anywhere in the module as
+        ``<expr>.<name>(...)``, collected with ``kwarg_called_names``.
     wrapper : cst.metadata.MetadataWrapper
         Metadata wrapper around the parsed module.
     """
@@ -260,16 +266,22 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
+        self.attr_called_names = set()
         self.kwarg_called_names = self._collect_kwarg_called_names()
 
     def _collect_kwarg_called_names(self):
         """Names of functions/methods called with keyword arguments anywhere
         in the module. Cython compiles C-level calls as positional-only, so
-        cells called with keyword arguments must stay plain Python methods."""
+        cells called with keyword arguments must stay plain Python methods.
+
+        Also fills ``attr_called_names`` with the names of all methods
+        called as attributes."""
         names = set()
         for call in m.findall(self.wrapper.module, m.Call()):
+            func = call.func
+            if isinstance(func, cst.Attribute):
+                self.attr_called_names.add(func.attr.value)
             if any(a.keyword is not None or a.star == "**" for a in call.args):
-                func = call.func
                 if isinstance(func, cst.Attribute):
                     names.add(func.attr.value)
                 elif isinstance(func, cst.Name):
@@ -426,3 +438,255 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
 
         return False
 
+
+# ---------------------------------------------------------------------------
+# Names that cannot be compiled
+#
+# A model name reaches the generated code in these positions: a cells
+# name is a cpdef method of the .pxd and a member of the C vtable struct;
+# a cells parameter is a parameter of the .pxd declarations; a reference,
+# a space parameter and a child space are cdef attributes of the .pxd and
+# members of the C object struct.  Local variables and the .py sources are
+# not affected: Cython reads a .py file with Python's keywords only, and
+# it prefixes the C names of locals and parameters.  The names below were
+# measured by compiling each candidate in each position, with each C type
+# mx2cy declares, with Cython 3.2 and MSVC 14.37.  The C macros are those
+# of the standard headers that Python.h and Cython's code include, of
+# Python's own headers and of Cython itself; some of the error numbers,
+# structmember.h names and Py_ constants were added from the headers
+# without a build of each.  The list is not exhaustive: a macro it misses
+# is still reported by the C compiler.
+
+CYTHON_KEYWORDS = frozenset([
+    "include", "cimport", "cdef", "cpdef", "ctypedef",
+    "DEF", "IF", "ELIF", "ELSE",
+])
+"""frozenset: Cython's reserved words: invalid wherever a name is declared
+in a .pxd file."""
+
+C_OBJECT_MACROS = frozenset("""
+NULL errno stdin stdout stderr EOF BUFSIZ FILENAME_MAX FOPEN_MAX L_tmpnam
+SEEK_CUR SEEK_END SEEK_SET TMP_MAX WEOF EXIT_FAILURE EXIT_SUCCESS
+MB_CUR_MAX RAND_MAX
+EDOM ERANGE EILSEQ EINVAL ENOMEM ENOENT EACCES EAGAIN EBADF EBUSY EEXIST
+EINTR EIO EPERM EPIPE ECHILD EFAULT
+CHAR_BIT SCHAR_MIN SCHAR_MAX UCHAR_MAX CHAR_MIN CHAR_MAX MB_LEN_MAX
+SHRT_MIN SHRT_MAX USHRT_MAX INT_MIN INT_MAX UINT_MAX LONG_MIN LONG_MAX
+ULONG_MAX LLONG_MIN LLONG_MAX ULLONG_MAX
+INT8_MIN INT8_MAX INT16_MAX INT32_MAX INT64_MAX UINT8_MAX UINT16_MAX
+UINT32_MAX UINT64_MAX SIZE_MAX PTRDIFF_MAX PTRDIFF_MIN INTMAX_MAX
+INTMAX_MIN UINTMAX_MAX INTPTR_MAX WCHAR_MAX WCHAR_MIN
+INFINITY NAN HUGE_VAL HUGE_VALF HUGE_VALL
+M_PI M_E M_LN2 M_LN10 M_LOG2E M_LOG10E M_PI_2 M_PI_4 M_1_PI M_2_PI
+M_2_SQRTPI M_SQRT2 M_SQRT1_2
+FP_NAN FP_INFINITE FP_ZERO FP_SUBNORMAL FP_NORMAL MATH_ERRNO
+MATH_ERREXCEPT math_errhandling
+NDEBUG cdecl
+DOMAIN SING OVERFLOW UNDERFLOW TLOSS PLOSS
+E2BIG ENOSPC ESRCH ENOTDIR EISDIR ENFILE EMFILE ENOTTY EFBIG ESPIPE EROFS
+EMLINK EDEADLK ENAMETOOLONG ENOLCK ENOSYS ENOTEMPTY ETIMEDOUT ECONNRESET
+EWOULDBLOCK ENXIO ENOEXEC EXDEV ENODEV EDEADLOCK STRUNCATE EADDRINUSE
+EADDRNOTAVAIL EAFNOSUPPORT EALREADY EBADMSG ECANCELED ECONNABORTED
+ECONNREFUSED EDESTADDRREQ EHOSTUNREACH EIDRM EINPROGRESS EISCONN ELOOP
+EMSGSIZE ENETDOWN ENETRESET ENETUNREACH ENOBUFS ENODATA ENOLINK ENOMSG
+ENOPROTOOPT ENOSR ENOSTR ENOTCONN ENOTRECOVERABLE ENOTSOCK ENOTSUP
+EOPNOTSUPP EOTHER EOVERFLOW EOWNERDEAD EPROTO EPROTONOSUPPORT EPROTOTYPE
+ETIME ETXTBSY
+PLATFORM COMPILER LONG_BIT WORD_BIT
+T_SHORT T_INT T_LONG T_FLOAT T_DOUBLE T_STRING T_OBJECT T_CHAR T_BYTE
+T_UBYTE T_USHORT T_UINT T_ULONG T_STRING_INPLACE T_BOOL T_OBJECT_EX
+T_LONGLONG T_ULONGLONG T_PYSSIZET T_NONE READONLY READ_RESTRICTED
+PY_WRITE_RESTRICTED RESTRICTED PY_AUDIT_READ
+Py_True Py_False Py_None Py_NotImplemented Py_Ellipsis
+""".split())
+"""frozenset: Object-like C macros: a struct member of the name, which
+every cells, reference, space parameter and child space is, does not
+compile.  Besides those of the standard C headers, these are the
+SVID error types of MSVC's ``math.h`` (``DOMAIN``, ``OVERFLOW``, ...),
+the POSIX error numbers of ``errno.h``, and macros of Python's
+``pyconfig.h`` (``PLATFORM``, ``LONG_BIT``, ...), ``structmember.h``
+(``T_INT``, ``READONLY``, ...) and ``object.h`` (``Py_True``, ...)."""
+
+C_FUNCTION_MACROS = frozenset("""
+isnan isinf isfinite isnormal signbit fpclassify isgreater isgreaterequal
+isless islessequal islessgreater isunordered offsetof likely unlikely
+""".split()) | (frozenset({"min", "max"}) if sys.platform == "win32"
+                else frozenset())
+"""frozenset: Function-like C macros (``min`` and ``max`` only with MSVC):
+a cells of the name does not compile where compiled code calls it."""
+
+C_TYPE_WORDS = {
+    "long long": frozenset([
+        "signed", "unsigned", "long", "short", "char", "int", "double",
+        "float", "bint", "void", "complex"]),
+    "double": frozenset(["complex"]),
+    "bint": frozenset(["complex"]),
+}
+"""dict: C type of a .pxd declaration -> the names Cython reads as part of
+that type when they follow it, as in ``cdef public long long double``.
+``int`` is the exception for a parameter, where ``long long int`` is read
+as an unnamed parameter of that type, which compiles; and a cells named
+``str`` cannot return ``str``."""
+
+
+def _space_path(module: str, cls: str) -> str:
+    """``"Parent.Child"`` for module ``Pkg._m_Parent._mx_classes`` and
+    class ``_c_Child``: the space's name in the model."""
+    names = [p[len(MODULE_PREF):] for p in module.split(".")[1:]
+             if p[:len(MODULE_PREF)] == MODULE_PREF]
+    return ".".join(names + [cls[len(SPACE_PREF):]])
+
+
+class ReservedNameError(ValueError):
+    """A name in the model cannot be compiled by Cython or the C compiler."""
+
+
+def _raise_problems(problems):
+    if problems:
+        raise ReservedNameError(
+            "mx2cy cannot compile these names, which Cython or the C "
+            "compiler reserves; rename them in the model:\n  "
+            + "\n  ".join(problems))
+
+
+def check_reserved_names(visitors) -> None:
+    """Reject the model if a name in it cannot be compiled, whatever its type.
+
+    Run on the parsed sources before the sample run, so that the error
+    comes before the time the run takes.  Checks the cells, parameters,
+    references, space parameters (the parameters of ``__call__``) and
+    child spaces of the space classes against
+    :data:`CYTHON_KEYWORDS`, :data:`C_OBJECT_MACROS` and
+    :data:`C_FUNCTION_MACROS`, each where it breaks the build: a cells
+    only if it gets a ``cpdef`` (it has no closure and is not called
+    with keyword arguments), a parameter only if its cells gets a
+    ``cpdef`` or a ``cdef`` formula, and a function-like macro only for
+    a cells called as a method somewhere in the model.  The names that
+    break only after a C type are checked by :func:`check_type_words`
+    once the types are known.
+
+    mx2cy fails rather than renaming the names: a cells, reference or
+    space name is the model's interface, reached from outside the model
+    by that name, and a parameter name is part of the signature that
+    keyword calls use, so a rename would silently change what code using
+    the compiled model has to call.
+
+    Parameters
+    ----------
+    visitors : iterable of ModuleVisitor
+        The parsed modules of the model.  Only space modules
+        (``_mx_classes``) are checked: the model class stays a Python
+        class.
+
+    Raises
+    ------
+    ReservedNameError
+        Listing every offending name.
+    """
+    visitors = list(visitors)
+    kwarg_names = set().union(*(v.kwarg_called_names for v in visitors))
+    called_names = set().union(*(v.attr_called_names for v in visitors))
+    problems = []
+    for visitor in visitors:
+        if visitor.module.split(".")[-1] != MX_SPACE_MOD:
+            continue
+
+        def check(name, cls, what, macros=True, calls=False):
+            if name in CYTHON_KEYWORDS:
+                reason = "is a reserved word of Cython"
+            elif macros and name in C_OBJECT_MACROS:
+                reason = ("is a macro of the C headers the compiled "
+                          "module includes")
+            elif calls and name in C_FUNCTION_MACROS and name in called_names:
+                reason = ("is a function-like macro of the C headers the "
+                          "compiled module includes, and it is called")
+            else:
+                return
+            problems.append(
+                f"{_space_path(visitor.module, cls)}: {what} {name!r} {reason}")
+
+        for cls, cells in visitor.cells_info.items():
+            closures = visitor.closure_funcs.get(cls, ())
+            formulas = visitor.formula_defs.get(cls, ())
+            generators = visitor.generator_funcs.get(cls, ())
+            for name, info in cells.items():
+                if info.is_special():
+                    for p in info.params:   # __call__: the space parameters
+                        check(p, cls, "space parameter")
+                    continue
+                has_cpdef = name not in closures and name not in kwarg_names
+                has_cdef = (name in formulas
+                            and FORMULA_PREF + name not in generators)
+                if has_cpdef:
+                    check(name, cls, "cells", calls=True)
+                if has_cpdef or has_cdef:
+                    for p in info.params:
+                        # C parameters are prefixed: no macro clash
+                        check(p, cls, f"parameter of cells '{name}'",
+                              macros=False)
+        for cls, refs in visitor.ref_info.items():
+            for name in refs:
+                check(name, cls, "reference")
+        for cls, spaces in visitor.spaces.items():
+            for name in spaces:
+                check(name, cls, "child space")
+    _raise_problems(problems)
+
+
+def check_type_words(module_infos) -> None:
+    """Reject the model if a name cannot follow its C type in a .pxd.
+
+    Run once the C types are final, before the sources are rewritten:
+    checks each name that :class:`~modelx_cython.transformer.PXDGenerator`
+    declares after a C type -- cells after their return types,
+    parameters after their types, references after theirs -- against
+    :data:`C_TYPE_WORDS`.
+
+    Parameters
+    ----------
+    module_infos : iterable of ModuleInfo
+        The built modules of the model.
+
+    Raises
+    ------
+    ReservedNameError
+        Listing every offending name.
+    """
+    problems = []
+    for info in module_infos:
+        for cls_name, cls_info in info.classes.items():
+            where = _space_path(info.fqname, cls_name)
+
+            def check(name, ctype, what, param=False):
+                bad = C_TYPE_WORDS.get(ctype, frozenset())
+                if param:
+                    bad = bad - {"int"}
+                elif what == "cells" and ctype == "str":
+                    bad = frozenset(["str"])
+                if name in bad:
+                    problems.append(
+                        f"{where}: {what} {name!r} declared as {ctype} "
+                        "is read by Cython as part of the C type")
+
+            for cells in cls_info.cells.values():
+                if cells.is_special():
+                    continue
+                has_cpdef = not (cells.body_has_closure
+                                 or cells.called_with_kwargs)
+                has_cdef = (cells.has_formula_def
+                            and not cells.formula_is_generator)
+                if has_cpdef:
+                    check(cells.name, cells.get_rettype_expr(c_style=True),
+                          "cells")
+                if (has_cpdef or has_cdef) and cells.has_typeinfo():
+                    for p in cells.params:
+                        # the public method and the _f_ formula declare
+                        # the parameter with the same type
+                        check(p, cells.get_argtype_expr(p, c_style=True),
+                              f"parameter of cells '{cells.name}'",
+                              param=True)
+            for ref in cls_info.refs.values():
+                if ref.name not in cls_info.spaces:
+                    check(ref.name, ref.get_type_expr(c_style=True),
+                          "reference")
+    _raise_problems(problems)

@@ -528,3 +528,102 @@ def test_size_spec_change(sample_dir, model, spec):
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_old.py")], env=env).returncode == 0
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_new.py")], env=env
                           ).returncode == (1 if spec == 'spec_old.py' else 0)
+
+def run_text(argv, env, **kwargs):
+    """subprocess.run capturing text output, decoded as UTF-8 whatever
+    the locale's encoding: a decoding error in the reader thread would
+    leave the captured output empty."""
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", **kwargs)
+
+
+@pytest.mark.parametrize("sample_dir, model", [["reserved_names", "ReservedNames"]],
+                         indirect=["sample_dir"])
+def test_reserved_names(sample_dir, model):
+    """Names Cython or the C compiler cannot take fail before the sample run
+
+    Each would otherwise make an invalid .pxd file or C code that fails
+    to compile, after the sample run; mx2cy rejects them all at once,
+    naming each, and leaves no translated copy behind.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"), "--no-spec"]
+    result = run_text(argv, env, cwd=work_dir)
+    assert result.returncode != 0
+    err = result.stderr
+    assert "ReservedNameError: mx2cy cannot compile these names" in err
+    assert ("Space1: parameter of cells 'total' 'include' is a reserved "
+            "word of Cython") in err
+    assert "Space1: child space 'cdef' is a reserved word of Cython" in err
+    assert "Space1: reference 'NULL' is a macro of the C headers" in err
+    assert "Space1: cells 'errno' is a macro of the C headers" in err
+    assert ("Space1: cells 'isnan' is a function-like macro of the C headers "
+            "the compiled module includes, and it is called") in err
+    assert not (work_dir / "sample_ran.txt").exists()
+    assert not (work_dir / (model + "_nomx_cy")).exists()
+
+
+TYPE_WORDS_SAMPLE = """
+import pathlib
+pathlib.Path(__file__).with_name("sample_ran.txt").write_text("ran")
+
+from TypeWords_nomx import mx_model as m
+m.S.f(3)
+m.S.g(1.5)
+"""
+
+
+def test_failed_check_keeps_previous_output(tmp_path):
+    """A check that fails after the sample run leaves the previous output
+
+    The previous output directory is rotated to _BAK1, and the model
+    copied, only once every check has passed, including those that need
+    the traced types: an invalid ``return_type`` in the spec, and a
+    ``long long`` parameter named ``long``, which Cython would read as
+    part of its C type.
+    """
+    import modelx as mx
+
+    m = mx.new_model("TypeWords")
+    s = m.new_space("S")
+
+    def f(long):
+        return long * 2
+
+    def g(x):
+        return x / 2
+
+    for func in (f, g):
+        s.new_cells(func.__name__, func)
+    m.export(tmp_path / "TypeWords_nomx")
+    m.close()
+    (tmp_path / "sample.py").write_text(TYPE_WORDS_SAMPLE)
+    (tmp_path / "spec_bad_return.py").write_text(
+        '{"spaces": {"S": {"cells": {"g": {"return_type": "double"}}}}}')
+
+    # the output of an earlier translation
+    out_dir = tmp_path / "TypeWords_nomx_cy"
+    out_dir.mkdir()
+    (out_dir / "previous.txt").write_text("previous")
+
+    env = get_env(tmp_path)
+    base = [sys.executable, "-m", "modelx_cython", str(tmp_path / "TypeWords_nomx"),
+            "--sample", str(tmp_path / "sample.py"), "--translate-only"]
+    for opts, msg in [
+        (["--spec", str(tmp_path / "spec_bad_return.py")],
+         "invalid value for spec 'return_type': double"),
+        (["--no-spec"],
+         "ReservedNameError: mx2cy cannot compile these names"),
+    ]:
+        (tmp_path / "sample_ran.txt").unlink(missing_ok=True)
+        result = run_text(base + opts, env, cwd=tmp_path)
+        assert result.returncode != 0 and msg in result.stderr, result.stderr
+        assert (tmp_path / "sample_ran.txt").exists()
+        assert sorted(p.name for p in out_dir.iterdir()) == ["previous.txt"]
+        assert not (tmp_path / "TypeWords_nomx_cy_BAK1").exists()
+
+    assert ("S: parameter of cells 'f' 'long' declared as long long is read "
+            "by Cython as part of the C type") in result.stderr
