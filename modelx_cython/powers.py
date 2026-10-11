@@ -43,6 +43,10 @@ that is left alone therefore behaves as it does without this pass:
 usually it compiles, and where it is compared it still fails, which is a
 loud error rather than a wrong number.
 
+The same classifier decides, in :func:`demote_rebound_params`, whether a
+parameter that a formula binds again keeps its C type there: only if
+every value bound to it is provably of that type.
+
 Attributes
 ----------
 KIND_FLOAT : str
@@ -56,6 +60,7 @@ import logging
 from typing import Dict, List, Mapping, Optional
 
 import libcst as cst
+import libcst.matchers as m
 
 from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
@@ -328,22 +333,121 @@ def rewrite_powers(
     """
     if resolver is None:
         return node
-    param_kinds = {}
-    if cells.has_args() and cells.has_typeinfo():
-        for param in cells.params:
-            param_kinds[param] = kind_of_type_expr(
-                cells.get_argtype_expr(param, c_style=True)
-            )
     rewriter = _PowerRewriter(
-        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname, param_kinds)
+        OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname,
+                    _param_kinds(cells))
     )
     updated = node.body.visit(rewriter)
     if rewriter.declined:
         _logger.info(
-            f"'**' left as exported in {cells.fqname}, so a fractional "
-            "exponent there still compiles to complex arithmetic: "
-            + "; ".join(rewriter.declined[:3])
+            f"'**' left as exported in {cells.formula_fqname}, so a "
+            "fractional exponent there still compiles to complex "
+            "arithmetic: " + "; ".join(rewriter.declined[:3])
         )
     if not rewriter.rewritten:
         return node
     return node.with_changes(body=updated)
+
+
+def _param_kinds(cells) -> Dict[str, str]:
+    """The kind of each parameter of ``cells`` in its formula."""
+    param_kinds = {}
+    if cells.has_args() and cells.has_typeinfo():
+        for param in cells.params:
+            param_kinds[param] = kind_of_type_expr(
+                cells.get_argtype_expr(param, c_style=True, formula=True)
+            )
+    return param_kinds
+
+
+# ---------------------------------------------------------------------------
+# Parameters that a formula binds again
+#
+# A parameter keeps its C type in the formula only if every value the
+# formula binds to it is provably of that type, by the classifier above.
+# Otherwise Cython rejects the formula, as for ``rate = rate / 100`` with
+# an integer ``rate`` ("Cannot assign type 'double' to 'long long'"), or,
+# for ``t /= 2``, it compiles and truncates the quotient.  The bindings
+# are collected by modelx_cython.parser.collect_param_rebinds.
+
+def _rebind_fits(value, ctype: str, kind: OperandKind) -> bool:
+    """Whether ``value``, bound to a parameter of C type ``ctype``, is
+    provably of that type.
+
+    A value of kind :data:`KIND_INT` fits a ``long long`` unless it has
+    a ``**``, whose type Cython derives from the sign of the exponent
+    (``2 ** -t`` is a double); one of kind :data:`KIND_INT` or
+    :data:`KIND_FLOAT` fits a ``double``.  Nothing fits another C type,
+    and a binding whose value is unknown (a for loop, unpacking, ...)
+    fits none.
+    """
+    if not isinstance(value, cst.BaseExpression):
+        return False
+    if ctype == CY_INT_T:
+        return (kind.kind(value) == KIND_INT
+                and not m.findall(value, m.Power()))
+    elif ctype == CY_FLOAT_T:
+        return kind.kind(value) in (KIND_INT, KIND_FLOAT)
+    return False
+
+
+def demote_rebound_params(
+    module_infos: Mapping[str, object],
+    resolver: CellsResolver,
+    cells_kinds: Mapping[str, str],
+    ref_kinds: Mapping[str, Mapping[str, str]],
+) -> None:
+    """Type ``object`` the parameters a formula binds to other types.
+
+    For every cells with type information whose formula binds one of
+    its C-typed parameters again (see
+    :attr:`~modelx_cython.builder.CombinedCellsInfo.param_rebinds`),
+    each bound value must be provably of the parameter's C type (see
+    :func:`_rebind_fits`), classified with the parameter types of the
+    formula.  If one is not, the parameter is typed ``object`` in the
+    formula with
+    :meth:`~modelx_cython.builder.CombinedCellsInfo.demote_rebound_param`,
+    which logs it.  A parameter typed ``object`` is unknown to the
+    classifier, so the check is repeated until no parameter changes.
+
+    Run once the return types of all cells are final, as they are for
+    :func:`build_kind_maps`, and before any parameter type is read.
+
+    Parameters
+    ----------
+    module_infos : mapping of str to ModuleInfo
+        The parsed modules, keyed by module fqname.
+    resolver : CellsResolver
+        As for :func:`rewrite_powers`.
+    cells_kinds, ref_kinds : mapping
+        As returned by :func:`build_kind_maps`.
+    """
+    for info in module_infos.values():
+        for cls_info in info.classes.values():
+            for cells in cls_info.cells.values():
+                if not (cells.param_rebinds and cells.has_typeinfo()):
+                    continue
+                changed = True
+                while changed:
+                    changed = False
+                    kind = OperandKind(resolver, cells_kinds, ref_kinds,
+                                       cls_info.fqname, _param_kinds(cells))
+                    for param, values in cells.param_rebinds.items():
+                        ctype = cells.get_argtype_expr(
+                            param, c_style=True, formula=True)
+                        if ctype == "object":
+                            continue
+                        for value in values:
+                            if not _rebind_fits(value, ctype, kind):
+                                cells.demote_rebound_param(
+                                    param, _describe_rebind(value, ctype))
+                                changed = True
+                                break
+
+
+def _describe_rebind(value, ctype: str) -> str:
+    if isinstance(value, cst.BaseExpression):
+        code = cst.Module([]).code_for_node(value).strip()
+        return (f"the formula binds it to {code}, which is not provably "
+                f"a {ctype}")
+    return f"the formula binds it in {value}"
