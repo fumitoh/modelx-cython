@@ -1,4 +1,5 @@
 import logging
+import numbers
 
 import numpy as np
 import pytest
@@ -14,6 +15,9 @@ from modelx_cython.monkeytype_tracing import CallTrace
 
 def foo(self, i):
     pass
+
+
+FOO = foo.__module__ + ".foo"
 
 
 def make_trace(ret_val, i):
@@ -195,3 +199,87 @@ def test_mxobj_outside_the_model_package_is_not_detected():
     info = RuntimeValueInfo.init_mxobj(1, MODEL_PKG)
     assert info.mx_class == ""
     assert info.type_ is int
+
+
+# --------------------------------------------------------------------
+# Argument type merge
+
+
+def make_arg_traces(*vals):
+    return [make_trace(None, v) for v in vals]
+
+
+def test_arg_float_and_numpy_float_widen_to_real(caplog):
+    """float and numpy.float64 arguments, both C doubles, are typed
+    double"""
+    traces = make_arg_traces(1.5, np.float64(2.5))
+    with caplog.at_level(logging.INFO, logger="modelx_cython.tracer"):
+        info = RuntimeCellsInfo(traces)
+    assert info.arg_types == {"i": numbers.Real}
+    assert info.max_args == {}
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO]
+
+
+@pytest.mark.parametrize("other", [
+    np.float32(0.1), np.longdouble(0.1), np.float16(0.5)])
+def test_arg_float_and_other_real_types_fall_back_to_object(other, caplog):
+    """A real type that is not float computes differently from a double:
+    float32(0.1) * 3 is float32(0.3), not 0.30000000447034836"""
+    traces = make_arg_traces(1.5, other)
+    with caplog.at_level(logging.INFO, logger="modelx_cython.tracer"):
+        info = RuntimeCellsInfo(traces)
+    assert info.arg_types == {"i": object}
+    msgs = [r.message for r in caplog.records]
+    assert len(msgs) == 1
+    assert "(typed object: real types that are not all float)" in msgs[0]
+
+
+def test_arg_int_and_float_fall_back_to_object_and_are_logged(caplog):
+    traces = make_arg_traces(1, 2.0)
+    with caplog.at_level(logging.INFO, logger="modelx_cython.tracer"):
+        info = RuntimeCellsInfo(traces)
+    assert info.arg_types == {"i": object}
+    msgs = [r.message for r in caplog.records]
+    assert len(msgs) == 1
+    assert (f"varying types given to argument 'i' in "
+            f"{FOO}: int 1, float 2.0") in msgs[0]
+    assert "integral and non-integral" in msgs[0]
+
+
+@pytest.mark.parametrize("vals", [
+    ("a", 1.0),
+    (None, 1.0),
+    ([1], (1,)),
+    (True, np.bool_(False)),
+])
+def test_arg_other_mixtures_fall_back_to_object_and_are_logged(vals, caplog):
+    """Every demotion of an argument to object is logged, not only the
+    integral and non-integral mixture"""
+    with caplog.at_level(logging.INFO, logger="modelx_cython.tracer"):
+        info = RuntimeCellsInfo(make_arg_traces(*vals))
+    assert info.arg_types == {"i": object}
+    msgs = [r.message for r in caplog.records
+            if "varying types given to argument 'i'" in r.message]
+    assert len(msgs) == 1
+    assert "(typed object)" in msgs[0]
+
+
+def test_arg_log_shortens_long_values(caplog):
+    with caplog.at_level(logging.INFO, logger="modelx_cython.tracer"):
+        RuntimeCellsInfo(make_arg_traces(np.arange(1000), "x"))
+    msg = caplog.records[0].message
+    assert "\n" not in msg
+    assert "..." in msg
+    assert len(msg) < 300
+
+
+@pytest.mark.parametrize("vals, expected", [
+    ((1, np.int64(5), 3), numbers.Integral),
+    (("a", np.str_("b")), str),
+    ((1.0, 2.0), float),
+])
+def test_arg_existing_rules_are_kept(vals, expected):
+    info = RuntimeCellsInfo(make_arg_traces(*vals))
+    assert info.arg_types == {"i": expected}
+    if expected is numbers.Integral:
+        assert info.max_args == {"i": 5}
