@@ -1,5 +1,20 @@
 # Release Notes
 
+## Unreleased
+
+### Spec keys
+
+* `use_libm` (top level, off by default): compiles `math.exp`, `math.log`
+  and `math.pow` on C numbers to the C library functions.  Finite results
+  were measured bit-identical to the `math` module with MSVC over 3.2
+  million arguments, and every non-finite case, overflow and domain
+  error is handed to the `math` module, so it returns or raises exactly
+  what Python does.  A `**` on a rewritten call is rewritten too, so
+  that it stays off Cython's complex path, and a call on a rewritten
+  `**` is rewritten.
+
+See {doc}`spec` and {doc}`architecture`.
+
 ## v0.1.0 (5 September 2026)
 
 This release supports the two export options that

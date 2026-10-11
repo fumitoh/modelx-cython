@@ -464,6 +464,9 @@ class CombinedRefInfo:
         refs.
     is_relative : bool
         True when ``decl_type_expr`` is relative to ``module``.
+    module_name : str
+        The ``__name__`` of the sampled value when it is a module
+        (``"math"`` for a reference to the math module), else ``''``.
     """
 
     module: str
@@ -473,6 +476,7 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
+    module_name: str = ''
 
     def __init__(self, module,
                  cls,
@@ -506,6 +510,7 @@ class CombinedRefInfo:
             self.mx_class = rt_info.mx_class
             self.decl_type_expr = decl_type_expr
             self.is_relative = is_relative
+            self.module_name = getattr(rt_info, "module_name", "")
         else:
             self.module = module
             self.cls = cls

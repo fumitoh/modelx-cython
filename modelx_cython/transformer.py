@@ -62,7 +62,7 @@ from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, Clas
 
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
-from modelx_cython.powers import rewrite_powers
+from modelx_cython.powers import rewrite_powers, rewrite_math_calls
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -485,13 +485,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         resolver=None,
         cells_kinds=None,
         ref_kinds=None,
+        math_refs=None,
     ) -> None:
         """Parse ``source`` and record the module info and package.
 
         ``resolver``, ``cells_kinds`` and ``ref_kinds`` are the
         model-wide inputs of :mod:`modelx_cython.powers`; without them
         no ``**`` is rewritten and every formula body is emitted as
-        modelx exported it.
+        modelx exported it.  ``math_refs``, from
+        :func:`~modelx_cython.powers.build_math_refs`, is given only
+        when the spec sets ``"use_libm"``; without it no ``math`` call
+        is rewritten.
         """
         super().__init__()
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
@@ -501,16 +505,23 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self._math_refs = math_refs
 
     def _rewrite_powers(self, node, cls_info, cells):
-        """Rewrite the provably real ``**`` of one formula body.
+        """Rewrite the provably real ``**`` of one formula body, and,
+        under the spec's ``"use_libm"``, its ``math`` calls on C
+        numbers.
 
         See :mod:`modelx_cython.powers`; the node is returned unchanged
-        when no operand pair can be typed.
+        when nothing can be typed.
         """
-        return rewrite_powers(
+        node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells,
+            cls_info.fqname, cells, math_refs=self._math_refs,
+        )
+        return rewrite_math_calls(
+            node, self._resolver, self._cells_kinds, self._ref_kinds,
+            self._math_refs, cls_info.fqname, cells,
         )
 
     @property   # cannot use cached_property in Transformer

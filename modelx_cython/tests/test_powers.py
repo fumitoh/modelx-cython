@@ -3,7 +3,7 @@ import pytest
 
 from modelx_cython.powers import (
     KIND_FLOAT, KIND_INT, KIND_UNKNOWN, OperandKind, build_kind_maps,
-    kind_of_type_expr, rewrite_powers,
+    build_math_refs, kind_of_type_expr, rewrite_math_calls, rewrite_powers,
 )
 from modelx_cython.usage import CellsResolver
 
@@ -268,3 +268,125 @@ def test_kind_maps_feed_the_classifier():
     )
     assert kind.kind(cst.parse_expression("self.rate(0)")) == KIND_FLOAT
     assert kind.kind(cst.parse_expression("self.rate_ref")) == KIND_FLOAT
+
+
+# --------------------------------------------------------------------
+# math.exp/log/pow under the spec's "use_libm"
+
+
+def _rewrite_math(body: str, math_refs=None) -> str:
+    resolver = CellsResolver(
+        cells_by_class={CLS: {"rate": RATE, "arr": ARR}},
+        refs_by_class={CLS: {"math": "", "np": ""}},
+        spaces_by_class={CLS: {}},
+    )
+    func = cst.parse_statement(f"def _f_target(self, t, x):\n    {body}\n")
+    out = rewrite_math_calls(
+        func, resolver,
+        cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN},
+        ref_kinds={CLS: {}},
+        math_refs={CLS: {"math"}} if math_refs is None else math_refs,
+        cls_fqname=CLS,
+        cells=_FakeCells(),
+    )
+    return cst.Module([]).code_for_node(out)
+
+
+@pytest.mark.parametrize("body, expected", [
+    ("return self.math.exp(x)", "return _mx_sys._mx_exp(x)"),
+    ("return self.math.exp(-self.rate(t) * t)",
+     "return _mx_sys._mx_exp(-self.rate(t) * t)"),
+    ("return self.math.log(1 + x)", "return _mx_sys._mx_log(1 + x)"),
+    ("return self.math.pow(x, 0.5)", "return _mx_sys._mx_math_pow(x, 0.5)"),
+    # an integer argument is cast explicitly, as math converts it
+    ("return self.math.exp(t)",
+     "return _mx_sys._mx_exp(_mx_cy.cast(_mx_cy.double, t))"),
+    ("return self.math.pow(2, t)",
+     "return _mx_sys._mx_math_pow(_mx_cy.cast(_mx_cy.double, 2), "
+     "_mx_cy.cast(_mx_cy.double, t))"),
+    # nested calls are both rewritten
+    ("return self.math.exp(self.math.log(x))",
+     "return _mx_sys._mx_exp(_mx_sys._mx_log(x))"),
+])
+def test_math_calls_are_rewritten(body, expected):
+    assert expected in _rewrite_math(body)
+
+
+@pytest.mark.parametrize("body", [
+    "return self.math.log(x, 2.0)",         # two-argument log
+    "return self.math.exp(x=x)",            # keyword
+    "return self.math.pow(*[x, 2.0])",      # starred
+    "return self.math.exp(local)",          # unknown argument
+    "return self.math.exp(self.arr(t)[0])",
+    "return self.math.sqrt(x)",             # not lowered
+    "return self.np.exp(x)",                # not the math module
+    "return math.exp(x)",                   # not through a reference
+    "return self.other.math.exp(x)",
+    "return [self.math.exp(x) for x in range(3)]",  # x may be rebound
+])
+def test_math_calls_left_alone(body):
+    assert "_mx_sys" not in _rewrite_math(body)
+
+
+def test_math_calls_need_use_libm():
+    """Without math_refs (no "use_libm" in the spec) nothing changes"""
+    assert "_mx_sys" not in _rewrite_math("return self.math.exp(x)", {})
+    assert "_mx_sys" not in _rewrite_math(
+        "return self.math.exp(x)", {CLS + "_other": {"math"}})
+
+
+def test_build_math_refs():
+    import math
+    import types
+    from modelx_cython.builder import CombinedRefInfo
+    from modelx_cython.tracer import RuntimeRefInfo
+
+    refs = {name: CombinedRefInfo("M._mx_classes", "_c_S", name,
+                                  RuntimeRefInfo.init_mxobj(value, "M"))
+            for name, value in [("math", math), ("m", math), ("np", types),
+                                ("x", 1.0)]}
+    cls_info = types.SimpleNamespace(fqname="M._mx_classes._c_S", refs=refs)
+    info = types.SimpleNamespace(classes={"_c_S": cls_info})
+    assert build_math_refs({"M._mx_classes": info}) == {
+        "M._mx_classes._c_S": {"math", "m"}}
+
+
+# --------------------------------------------------------------------
+# '**' and math calls under use_libm, applied to each other
+
+
+@pytest.mark.parametrize("body, expected", [
+    # the power of a math call that becomes a C double is rewritten too:
+    # left alone, it would go on Cython's complex path, which max()
+    # cannot compare
+    ("return max(self.math.exp(x) ** 0.5, 1.0)",
+     "return max(_mx_sys._mx_pow(_mx_sys._mx_exp(x), 0.5), 1.0)"),
+    ("return 2 ** self.math.log(x)",
+     "return _mx_sys._mx_pow(_mx_cy.cast(_mx_cy.double, 2), "
+     "_mx_sys._mx_log(x))"),
+    # a math call on a rewritten power is rewritten
+    ("return self.math.exp(x ** 2.0)",
+     "return _mx_sys._mx_exp(_mx_sys._mx_pow(x, 2.0))"),
+    ("return self.math.exp(x ** 2.0) ** 0.5",
+     "return _mx_sys._mx_pow(_mx_sys._mx_exp(_mx_sys._mx_pow(x, 2.0)), 0.5)"),
+])
+def test_powers_and_math_calls_together(body, expected):
+    resolver = CellsResolver(
+        cells_by_class={CLS: {"rate": RATE}},
+        refs_by_class={CLS: {"math": ""}},
+        spaces_by_class={CLS: {}},
+    )
+    func = cst.parse_statement(f"def _f_target(self, t, x):\n    {body}\n")
+    args = dict(cells_kinds={RATE: KIND_FLOAT}, ref_kinds={CLS: {}},
+                cls_fqname=CLS, cells=_FakeCells())
+    math_refs = {CLS: {"math"}}
+    func = rewrite_powers(func, resolver, math_refs=math_refs, **args)
+    func = rewrite_math_calls(func, resolver, math_refs=math_refs, **args)
+    assert expected in cst.Module([]).code_for_node(func)
+
+
+def test_powers_without_use_libm_leave_math_calls_unknown():
+    """Without use_libm the math call stays a Python object, and a power
+    on it is left as exported"""
+    out = _rewrite("return max(self.math.exp(x) ** 0.5, 1.0)")
+    assert "self.math.exp(x) ** 0.5" in out

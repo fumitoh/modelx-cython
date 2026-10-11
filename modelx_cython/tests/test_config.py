@@ -32,3 +32,20 @@ class TestConf:
     def test_get_data2(self, obj_path):
         data = TransSpec(testdata).get_spec(obj_path)
         assert data == testdata_nested
+
+
+class TestUseLibm:
+
+    def test_default_off(self):
+        assert TransSpec({}).get_use_libm() is False
+
+    @pytest.mark.parametrize("value", [True, False])
+    def test_valid(self, value):
+        spec = TransSpec({"use_libm": value,
+                          "spaces": {"Projection": testdata_space}})
+        assert spec.get_use_libm() is value
+
+    @pytest.mark.parametrize("value", [1, 0, "True", None])
+    def test_invalid(self, value):
+        with pytest.raises(ValueError, match="expected True or False"):
+            TransSpec({"use_libm": value}).get_use_libm()
