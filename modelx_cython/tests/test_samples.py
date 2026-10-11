@@ -528,3 +528,56 @@ def test_size_spec_change(sample_dir, model, spec):
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_old.py")], env=env).returncode == 0
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_new.py")], env=env
                           ).returncode == (1 if spec == 'spec_old.py' else 0)
+
+def run_text(argv, env, **kwargs):
+    """subprocess.run capturing text output, decoded as UTF-8 whatever
+    the locale's encoding: a decoding error in the reader thread would
+    leave the captured output empty."""
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", **kwargs)
+
+
+@pytest.mark.parametrize("sample_dir, model", [["spec_options", "SpecOptions"]],
+                         indirect=["sample_dir"])
+def test_spec_options(sample_dir, model):
+    """The spec key compiler_directives
+
+    ``compiler_directives`` reaches cythonize in setup.py, after
+    ``freethreading_compatible``, and an invalid or unsupported
+    directive fails before anything is translated.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+    base = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py")]
+
+    # invalid specs fail before anything is translated, and before the
+    # output directory is rotated or written
+    for spec, msg in [
+        ("spec_bad_directive.py", "'infer_type' is not a Cython compiler directive"),
+        ("spec_bad_cpow.py",
+         "mx2cy does not support the Cython directive cpow=True"),
+    ]:
+        result = run_text(base + ["--spec", str(work_dir / spec), "--translate-only"],
+                          env, cwd=work_dir)
+        assert result.returncode != 0 and msg in result.stderr, result.stderr
+        assert not (work_dir / (model + "_nomx_cy")).exists()
+        assert not (work_dir / (model + "_nomx_cy_BAK1")).exists()
+
+    # without the key, only freethreading_compatible is set
+    result = run_text(base + ["--no-spec", "--translate-only"], env, cwd=work_dir)
+    assert result.returncode == 0, result.stderr
+    assert ('compiler_directives={"freethreading_compatible": True}'
+            in (work_dir / "setup.py").read_text(encoding="utf-8"))
+
+    result = run_text(base + ["--spec", str(work_dir / "spec.py"),
+                              "--log-level", "INFO"], env, cwd=work_dir)
+    assert result.returncode == 0, result.stderr
+
+    setup = (work_dir / "setup.py").read_text(encoding="utf-8")
+    assert ('compiler_directives={"freethreading_compatible": True, '
+            '"infer_types": True}') in setup
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")], env=env
+    ).returncode == 0

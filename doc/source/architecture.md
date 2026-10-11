@@ -87,7 +87,9 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    positional-only.
 
 7. **Compile** — {py:func}`modelx_cython.cli.create_setup` writes a
-   `setup.py` that cythonizes all translated modules, and
+   `setup.py` that cythonizes all translated modules, with the
+   `freethreading_compatible` directive and the spec's
+   `compiler_directives`, and
    {py:func}`modelx_cython.cli.compile_main` runs it with
    `build_ext --inplace` in a subprocess.
 
