@@ -62,9 +62,18 @@ class TransSpec:
       information for the cells; otherwise it is ignored (with a
       warning for ``"memoryview"``) and the return type falls back
       to ``object``.
+    * ``"param_type"``: dict mapping parameter names of the cells to
+      type names accepted by :data:`modelx_cython.typedefs.str_to_type`
+      that override the traced parameter types, e.g.
+      ``{"t": "int", "rate": "float"}``.  Parameters it does not name
+      keep their traced types.  Like ``"return_type"``, it takes
+      effect only when the sample run produced type information for
+      the cells (otherwise it is ignored with a warning).  A
+      parameter name the cells does not have, or an unknown type
+      name, is an error.
 
-    The ``"space_params"`` and ``"param_type"`` keys are defined
-    below but are not currently consumed by the pipeline.
+    The ``"space_params"`` key is defined below but is not currently
+    consumed by the pipeline.
 
     Attributes
     ----------
@@ -86,7 +95,7 @@ class TransSpec:
         Value ``"memoryview"`` for ``"return_type"`` forcing
         memoryview emission.
     PARAM_T : str
-        Key ``"param_type"`` (currently unused).
+        Key ``"param_type"`` in a per-cells spec.
     """
 
     SPACES = "spaces"

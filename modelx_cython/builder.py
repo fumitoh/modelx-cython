@@ -99,6 +99,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         Value of the spec key ``"return_type"``, or ``""`` if absent.
     _force_memoryview : bool
         True when the spec sets ``"return_type": "memoryview"``.
+    _spec_param_t : dict
+        Value of the spec key ``"param_type"``: parameter names mapped
+        to type names of :data:`~modelx_cython.typedefs.str_to_type`
+        that override the traced parameter types.  Empty if absent.
     called_with_kwargs : bool
         True if a call with keyword arguments anywhere in the model
         names a function matching this cells' name.  Cython C-level
@@ -127,7 +131,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         If the spec requests ``"return_type": "memoryview"`` but the
         traced return value is not a real-valued numpy array with at
         least one dimension.  If no type information was sampled at
-        all, the request is ignored with a warning instead.
+        all, the request is ignored with a warning instead.  Also if
+        the spec's ``"param_type"`` is not a dict, names a parameter
+        the cells does not have, or gives a type name not in
+        :data:`~modelx_cython.typedefs.str_to_type`.
     """
 
     parent: 'ClassInfo'
@@ -173,6 +180,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         self._spec = spec
         self._spec_ret_t = spec.get(TransSpec.RET_T, "")
         self._force_memoryview = self._spec_ret_t == TransSpec.RET_MEMORYVIEW
+        self._spec_param_t = self._init_spec_param_t(
+            spec.get(TransSpec.PARAM_T, {}))
         if self._force_memoryview:
             if self.has_typeinfo():
                 if not (self.is_array_returned and self.is_real_value
@@ -187,6 +196,61 @@ class CombinedCellsInfo(LexicalCellsInfo):
                     f"spec '{TransSpec.RET_T}': '{TransSpec.RET_MEMORYVIEW}' "
                     f"for '{self.fqname}' is ignored because no type "
                     "information was sampled")
+
+    def _init_spec_param_t(self, param_t) -> Dict[str, type]:
+        """Validate the spec's ``"param_type"`` and map it to types.
+
+        Like a spec return type, it takes effect only when the sample
+        run produced type information for the cells; otherwise it is
+        ignored with a warning, and the parameters stay ``object``.
+        """
+        key = TransSpec.PARAM_T
+        if not isinstance(param_t, dict):
+            raise ValueError(
+                f"invalid value for spec '{key}' of '{self.fqname}': "
+                f"expected a dict of parameter names to type names, "
+                f"got {param_t!r}")
+        result = {}
+        for param, type_name in param_t.items():
+            if param not in self.params:
+                raise ValueError(
+                    f"invalid spec '{key}' for '{self.fqname}': it has no "
+                    f"parameter named {param!r} (parameters: "
+                    f"{', '.join(self.params) or 'none'})")
+            if type_name not in str_to_type:
+                raise ValueError(
+                    f"invalid spec '{key}' for parameter {param!r} of "
+                    f"'{self.fqname}': {type_name!r} is not one of "
+                    f"{', '.join(repr(k) for k in str_to_type)}")
+            result[param] = str_to_type[type_name]
+        if result and not self.has_typeinfo():
+            _logger.warning(
+                f"spec '{key}' for '{self.fqname}' is ignored because no "
+                "type information was sampled")
+        return result
+
+    def _given_arg_type(self, arg: str) -> type:
+        """Type of parameter ``arg`` before any fallback: from the
+        spec's ``"param_type"`` if it names ``arg``, otherwise as
+        traced."""
+        if arg in self._spec_param_t:
+            return self._spec_param_t[arg]
+        assert arg in self._rt.arg_types
+        return self._rt.arg_types[arg]
+
+    def arg_type(self, arg: str) -> type:
+        """Type of parameter ``arg``: from the spec's
+        ``"param_type"`` if it names ``arg``, otherwise as traced.
+
+        Requires type information.
+
+        Parameters
+        ----------
+        arg : str
+            Parameter name.
+        """
+        assert self.has_typeinfo()
+        return self._given_arg_type(arg)
 
     @cached_property
     def norm_type(self) -> type:
@@ -316,6 +380,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def get_argtype_expr(self, arg: str, c_style=False) -> str:
         """Return the Cython type expression for a parameter.
 
+        The type is the one the spec's ``"param_type"`` gives, if it
+        names the parameter, or else the traced one (see
+        :meth:`arg_type`).
+
         Parameters
         ----------
         arg : str
@@ -333,8 +401,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
             information was sampled.
         """
         if self.has_typeinfo():
-            assert arg in self._rt.arg_types
-            return get_type_expr(self._rt.arg_types[arg], c_style=c_style)
+            return get_type_expr(self.arg_type(arg), c_style=c_style)
         else:
             return "object"
 
@@ -374,11 +441,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
             return "object"
 
     def is_arg_int(self, arg: str):
-        """Return True if the sampled type of parameter ``arg`` is
-        integral.
+        """Return True if the type of parameter ``arg`` (see
+        :meth:`arg_type`) is integral.
         """
         assert self.has_args() and self.has_typeinfo()
-        return issubclass(self._rt.arg_types[arg], numbers.Integral)
+        return issubclass(self.arg_type(arg), numbers.Integral)
 
     @cached_property
     def is_int_args(self):
@@ -399,11 +466,16 @@ class CombinedCellsInfo(LexicalCellsInfo):
         array.
 
         A cells is arrayable when all its parameters are integral and
-        it returns a real-valued scalar (not an array).  Requires
-        parameters and type information.
+        it returns a real-valued scalar (not an array).  A parameter
+        that the spec's ``"param_type"`` makes integral but that was
+        not traced as one has no observed maximum to size the array
+        with, so its cells is not arrayable.  Requires parameters and
+        type information.
         """
         assert self.has_args() and self.has_typeinfo()
-        if self.is_int_args and self.is_real_value and not self.is_array_returned:
+        if (self.is_int_args and self.is_real_value
+                and not self.is_array_returned
+                and all(p in self._rt.max_args for p in self.params)):
             return True
         else:
             return False

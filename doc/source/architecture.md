@@ -134,6 +134,9 @@ The runtime type summaries follow a few widening rules, implemented in
   element type lets read-only arrays, such as those produced by pandas
   under copy-on-write, be coerced.
 
+The spec can override the inferred types of a cells' return value and
+parameters (`return_type` and `param_type`, see {doc}`spec`).
+
 Most fallback decisions — conflicting argument or return types,
 usage-analysis fallbacks, spec sizes overridden by observed maxima, and
 cells demoted to plain Python methods — are logged at `INFO` level (run
