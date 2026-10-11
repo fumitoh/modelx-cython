@@ -132,7 +132,9 @@ The runtime type summaries follow a few widening rules, implemented in
 * Real-valued array returns are typed as `const` memoryviews (for
   example, `const double[:]`) subject to the usage analysis; the `const`
   element type lets read-only arrays, such as those produced by pandas
-  under copy-on-write, be coerced.
+  under copy-on-write, be coerced.  Every other array return — strings,
+  booleans, Python objects, a 0-d array — is `object`: an array of
+  strings is not a `str`.
 
 Most fallback decisions — conflicting argument or return types,
 usage-analysis fallbacks, spec sizes overridden by observed maxima, and

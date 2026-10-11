@@ -528,3 +528,54 @@ def test_size_spec_change(sample_dir, model, spec):
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_old.py")], env=env).returncode == 0
     assert subprocess.run([sys.executable, str(work_dir / "assert_cy_new.py")], env=env
                           ).returncode == (1 if spec == 'spec_old.py' else 0)
+
+def run_text(argv, env, **kwargs):
+    """subprocess.run capturing text output, decoded as UTF-8 whatever
+    the locale's encoding: a decoding error in the reader thread would
+    leave the captured output empty."""
+    return subprocess.run(argv, env=env, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", **kwargs)
+
+
+@pytest.mark.parametrize("sample_dir, model", [["nonreal_arrays", "NonrealArrays"]],
+                         indirect=["sample_dir"])
+def test_nonreal_arrays(sample_dir, model):
+    """Arrays that are not real-valued, and 0-d arrays, are returned as objects
+
+    An array of strings is not a ``str``: typed as its element type, the
+    compiled model raised "TypeError: Expected str, got numpy.ndarray".
+    A bool array does not coerce to a ``bint`` memoryview, whose buffer
+    format is not the array's '?', so a spec ``return_type`` of
+    ``"bool"`` on one is ``object`` too; and a 0-d array has no
+    memoryview type.
+    """
+    generate_nomx(work_dir := sample_dir, model)
+    env = get_env(work_dir)
+
+    argv = [sys.executable, "-m", "modelx_cython", str(work_dir / (model + "_nomx")),
+            "--sample", str(work_dir / "sample.py"),
+            "--spec", str(work_dir / "spec.py")]
+
+    result = run_text(argv, env, cwd=work_dir)
+    assert result.returncode == 0, result.stderr
+
+    pxd = (work_dir / (model + "_nomx_cy") / "_mx_classes.pxd").read_text()
+    for decl in [
+        # arrays of strings, cached without and with parameters
+        "cdef object _v_labels",
+        "cpdef object labels(_c_Space1 self)",
+        "cpdef object labels_n(_c_Space1 self, long long n)",
+        # a bool array that the spec types "bool"
+        "cpdef object flags(_c_Space1 self, long long n)",
+        # a 0-d real array
+        "cdef object _v_scalar_arr",
+        "cpdef object scalar_arr(_c_Space1 self)",
+        # the callers keep their types
+        "cpdef long long n_labels(_c_Space1 self, long long n)",
+        "cpdef long long flag_count(_c_Space1 self, long long n)",
+    ]:
+        assert decl + "\n" in pxd, decl
+
+    assert subprocess.run(
+        [sys.executable, str(work_dir / "assert_cy.py")], env=env
+    ).returncode == 0

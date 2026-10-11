@@ -1,5 +1,16 @@
 # Release Notes
 
+## Unreleased
+
+### Type inference
+
+* A cells returning a NumPy array of strings is now typed `object`
+  rather than `str`, which made the compiled model raise
+  `TypeError: Expected str, got numpy.ndarray`; so is any array that is
+  not real-valued, and a 0-d array.
+
+See {doc}`architecture`.
+
 ## v0.1.0 (5 September 2026)
 
 This release supports the two export options that

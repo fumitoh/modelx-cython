@@ -347,8 +347,11 @@ class CombinedCellsInfo(LexicalCellsInfo):
         that read-only arrays, such as those returned by pandas under
         copy-on-write, can be coerced; when :attr:`use_memoryview` is
         False the expression falls back to ``"object"`` instead.
-        Non-array returns use the expression for :attr:`norm_type`,
-        and cells without type information yield ``"object"``.
+        Every other array return is ``"object"``: an array of strings,
+        booleans or Python objects is neither its element type nor a
+        numeric memoryview.  Non-array returns use the expression for
+        :attr:`norm_type`, and cells without type information yield
+        ``"object"``.
 
         Parameters
         ----------
@@ -358,8 +361,13 @@ class CombinedCellsInfo(LexicalCellsInfo):
 
         if self.has_typeinfo():
             typ = get_type_expr(self.norm_type, c_style=c_style)
-            if self.is_real_value and self.is_array_returned:
-                if not self.use_memoryview:
+            if self.is_array_returned:
+                # A str array is not a str, a bool array does not coerce
+                # to a bint memoryview (its buffer format is '?'), and a
+                # 0-d array has no memoryview type
+                if (not self.is_real_value or self.norm_type is bool
+                        or self._rt.ret_type.ndim < 1
+                        or not self.use_memoryview):
                     return "object"
                 # const element type so that read-only arrays, such as those
                 # returned by pandas under copy-on-write, can be coerced
