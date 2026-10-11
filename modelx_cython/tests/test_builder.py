@@ -139,3 +139,62 @@ def test_ref_never_sampled_declares_object():
     assert ref.mx_class == ""
     assert not ref.is_relative
     assert ref.get_type_expr(c_style=True) == "object"
+
+
+# --------------------------------------------------------------------
+# Spec "param_type"
+
+
+def make_param_cells(spec, arg_types, max_args=None, params=("t", "x")):
+    lx = LexicalCellsInfo("M._mx_classes", "_c_S", "foo", list(params))
+    rt = types.SimpleNamespace(
+        ret_type=ReturnTypeInfo(float),
+        arg_types=arg_types,
+        max_args=max_args if max_args is not None else {},
+    )
+    return CombinedCellsInfo(None, lx, rt, spec)
+
+
+def test_param_type_overrides_traced_types():
+    cells = make_param_cells(
+        {"param_type": {"x": "float", "t": "object"}},
+        {"t": int, "x": int}, {"t": 3, "x": 4})
+    assert cells.get_argtype_expr("x", c_style=True) == "double"
+    assert cells.get_argtype_expr("x") == "_mx_cy.double"
+    assert cells.get_argtype_expr("t", c_style=True) == "object"
+    assert not cells.is_arrayable()     # no longer all-integral
+
+
+def test_param_type_leaves_unnamed_params_traced():
+    cells = make_param_cells({"param_type": {"x": "int"}},
+                             {"t": int, "x": int}, {"t": 3, "x": 4})
+    assert cells.get_argtype_expr("t", c_style=True) == "long long"
+    assert cells.is_arrayable()
+
+
+def test_param_type_int_without_traced_max_is_not_arrayable():
+    """An argument traced as float has no maximum to size an array"""
+    cells = make_param_cells({"param_type": {"x": "int"}},
+                             {"t": int, "x": float}, {"t": 3})
+    assert cells.get_argtype_expr("x", c_style=True) == "long long"
+    assert cells.is_int_args
+    assert not cells.is_arrayable()
+
+
+@pytest.mark.parametrize("spec, match", [
+    ({"param_type": {"y": "int"}}, "has no parameter named 'y'"),
+    ({"param_type": {"x": "double"}}, "'double' is not one of"),
+    ({"param_type": {"x": "memoryview"}}, "'memoryview' is not one of"),
+    ({"param_type": ["x"]}, "expected a dict"),
+])
+def test_param_type_invalid_raises(spec, match):
+    with pytest.raises(ValueError, match=match):
+        make_param_cells(spec, {"t": int, "x": int})
+
+
+def test_param_type_without_typeinfo_ignored(caplog):
+    lx = LexicalCellsInfo("M._mx_classes", "_c_S", "foo", ["t"])
+    with caplog.at_level("WARNING", logger="modelx_cython.builder"):
+        cells = CombinedCellsInfo(None, lx, None, {"param_type": {"t": "int"}})
+    assert cells.get_argtype_expr("t", c_style=True) == "object"
+    assert "is ignored because no type information was sampled" in caplog.text

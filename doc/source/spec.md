@@ -74,7 +74,7 @@ declared range raises {py:exc}`IndexError`.
 
 ### `cells`
 
-Maps cells names to per-cells settings.  Currently one setting is defined:
+Maps cells names to per-cells settings.  Two settings are defined:
 
 `return_type`
 : Overrides the return type inferred from the sample run.  A
@@ -95,10 +95,25 @@ Maps cells names to per-cells settings.  Currently one setting is defined:
     setting is ignored with a warning if the sample run collected no type
     information for the cells.
 
+`param_type`
+: Overrides the parameter types inferred from the sample run.  A dict
+  mapping parameter names of the cells to `"bool"`, `"int"`, `"float"`,
+  `"str"` or `"object"`; the parameters it does not name keep their
+  inferred types.  Like `return_type`, it takes effect only when the
+  sample run collected type information for the cells, and is ignored
+  with a warning otherwise.  A parameter name the cells does not have,
+  or another type name, is an error.  A cells is cached in a C array
+  only if all its parameters are integers *and* the sample run observed
+  integer values for them, which size the array: a parameter that
+  `param_type` makes `"int"` but that the sample passed floats to gets
+  a dict cache instead, and one that it makes `"float"` or `"object"`
+  turns the C array into a dict cache.
+
 ```python
 {"cells":
      {"disc_factors": {"return_type": "object"},
-      "arr_whole": {"return_type": "memoryview"}}}
+      "arr_whole": {"return_type": "memoryview"},
+      "rate": {"param_type": {"t": "float"}}}}
 ```
 
 (deprecated-keys)=

@@ -1,5 +1,15 @@
 # Release Notes
 
+## Unreleased
+
+### Spec keys
+
+* `param_type` (per cells): overrides inferred parameter types, as
+  `return_type` does the return type.  The key was defined before but
+  had no effect.
+
+See {doc}`spec` and {doc}`architecture`.
+
 ## v0.1.0 (5 September 2026)
 
 This release supports the two export options that
