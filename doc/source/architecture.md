@@ -76,8 +76,10 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    caching bodies for cells with integer parameters.  It is also where
    {py:mod}`modelx_cython.powers` replaces the `**` operations whose
    operands are provably real with a call to `_mx_sys._mx_pow`, so that
-   Cython compiles them to C `pow` rather than to complex arithmetic.
-   In parallel, {py:class}`~modelx_cython.transformer.PXDGenerator` emits
+   Cython compiles them to C `pow` rather than to complex arithmetic,
+   and, where the spec sets `use_libm`, where `math.exp`, `math.log` and
+   `math.pow` calls on C numbers become calls of the C library
+   ({ref}`libm-math`).  In parallel, {py:class}`~modelx_cython.transformer.PXDGenerator` emits
    a `.pxd` declaration file per module so that modules can `cimport`
    each other.  Methods Cython cannot compile at the C level are left
    as plain Python methods: cells whose bodies contain closures
@@ -139,6 +141,7 @@ usage-analysis fallbacks, spec sizes overridden by observed maxima, and
 cells demoted to plain Python methods — are logged at `INFO` level (run
 `mx2cy` with `--log-level INFO` to see them).
 
+(real-valued-powers)=
 ## Real-valued `**`
 
 Cython gives `**` the semantics of Python's, so a `double` base raised
@@ -161,7 +164,8 @@ value while `(1 + rate(t)) ** (1 / 12)` does not have to.
 The proof is a conservative classifier over the formula's syntax tree.
 An operand is known to be floating or integral only when it is a
 numeric literal, a parameter or reference mx2cy has already typed, a
-call to a cells the resolver reaches, or arithmetic over those; true
+call to a cells the resolver reaches, a `math` call that the `use_libm`
+pass rewrites ({ref}`libm-math`), or arithmetic over those; true
 division counts as floating, which is what makes the `1 / 12` idiom
 work.  Everything else — local variables, subscripts, module
 attributes, and anything inside a construct that binds names of its own
@@ -175,6 +179,39 @@ still fails to compile rather than returning a wrong number.
 `_mx_pow` raises rather than returning the value C `pow` would in the
 two cases where it disagrees with Python: a negative base with a
 fractional exponent (`nan`) and `0.0` to a negative power (`inf`).
+
+(libm-math)=
+## C library `exp`, `log` and `pow`
+
+A formula reaches the `math` module through a reference, so
+`math.exp(x)` is exported as `self.math.exp(x)`, which Cython compiles to
+an attribute lookup and a Python call even when `x` is a C double.  Where
+the spec sets `use_libm` ({doc}`spec`),
+{py:func}`modelx_cython.powers.rewrite_math_calls` rewrites
+`self.<ref>.exp(x)`, `self.<ref>.log(x)` and `self.<ref>.pow(x, y)` to
+`_mx_sys._mx_exp`, `_mx_sys._mx_log` and `_mx_sys._mx_math_pow`, when
+the tracer saw `<ref>` hold the `math` module and the classifier above
+proves every argument a C number (an integer argument is cast to
+`double`, as `math` converts it).  A math call it rewrites counts as a C
+double for an enclosing math call, so `exp(log(x))` is rewritten inside
+out, and so does a `**` it rewrote, so `exp(x ** 2.0)` becomes
+`_mx_exp(_mx_pow(x, 2.0))`.  The `**` pass, which runs first, counts a
+math call that this pass will rewrite as a C double too: a `**` on it,
+as in `max(exp(x) ** 0.5, 1.0)`, must be rewritten to `_mx_pow`, or it
+would go on Cython's complex path once the call is a C double, and fail
+to compile where it is compared.
+
+The three wrappers in `_mx_sys.pxd` return the C function's result where
+the arguments and the result are all finite, and otherwise call the
+`math` function, so that the cases where C returns `inf` or `nan` and
+Python raises `OverflowError` or `ValueError`, and those with an
+infinite or `nan` argument, behave exactly as in Python.  Their finite
+results were measured bit-identical to `math`'s with MSVC 14.37 (`/O2`,
+the flags `setuptools` uses) and CPython 3.13.9 over 3,209,203
+arguments — uniform, subnormal, near-overflow, near-one, random bit
+patterns, and the exponents models use — with not one finite C result
+where Python raises.  The loops calling them are not vectorized under
+`/fp:precise`, so the scalar functions measured are the ones that run.
 
 ## Cells caching in the compiled model
 

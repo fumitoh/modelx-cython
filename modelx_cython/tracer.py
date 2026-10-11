@@ -42,7 +42,7 @@ import numbers
 import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
-from types import FrameType, MemberDescriptorType
+from types import FrameType, MemberDescriptorType, ModuleType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 import logging
 
@@ -314,12 +314,19 @@ class RuntimeValueInfo:
         Fully qualified name of the value's class when it is defined
         inside the traced model package (i.e. a modelx object),
         otherwise an empty string.
+    module_name : str
+        The ``__name__`` of the value when it is a module, such as
+        ``"math"`` for a reference to the math module, otherwise an
+        empty string.
     """
 
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
         self.type_ = type(value)
         self.mx_class = mx_class
+        self.module_name = (
+            getattr(value, "__name__", "")
+            if isinstance(value, ModuleType) else "")
 
     @classmethod
     def init_mxobj(cls, value, module):

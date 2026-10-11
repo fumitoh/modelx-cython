@@ -49,7 +49,7 @@ from modelx_cython.parser import ModuleVisitor
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
     analyze_usage, apply_verdicts, build_resolver)
-from modelx_cython.powers import build_kind_maps
+from modelx_cython.powers import build_kind_maps, build_math_refs
 
 _logger = logging.getLogger(__name__)
 
@@ -214,13 +214,15 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     location (``args.setup`` if given, otherwise ``setup.py`` in the
     same parent directory).
 
-    Unless ``args.compile_only`` is set, performs the translation:
-    rotates backups of the output directory, copies the model there,
-    copies the bundled ``_mx_sys.pxd`` into it, runs the sample script
-    under tracing via :func:`run_sample`, and reads the spec file with
+    Unless ``args.compile_only`` is set, performs the translation.
+    First, before anything is written: reads the spec file with
     :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
     missing spec file re-raises :class:`FileNotFoundError` with a hint
-    to use ``--no-spec``).  Translation proper then runs in three
+    to use ``--no-spec``) and validates its model-wide key
+    ``use_libm``.  Then rotates backups of the output directory,
+    copies the model there, copies the bundled ``_mx_sys.pxd`` into
+    it, and runs the sample script under tracing via
+    :func:`run_sample`.  Translation proper then runs in three
     phases: (1) parse every model/space module and build its
     :class:`~modelx_cython.builder.ModuleInfo` -- all space modules
     are included even when the sample never exercised their cells
@@ -233,7 +235,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     keyword arguments anywhere in the model so their public methods
     stay plain Python methods (C-level calls are positional-only);
     (3) rewrite each included module with
-    :class:`~modelx_cython.transformer.ModuleTransformer`, write its
+    :class:`~modelx_cython.transformer.ModuleTransformer` (which, under
+    the spec's ``use_libm``, also compiles ``math`` calls on C numbers
+    to the C library), write its
     ``.pxd`` and ``__init__.pxd`` files, and finally write the
     generated ``setup.py`` via :func:`create_setup`.  Model sources
     are read and written as UTF-8 regardless of locale.
@@ -263,6 +267,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     FileNotFoundError
         If translation is performed (``--compile-only`` not set), the
         spec file does not exist, and ``--no-spec`` was not given.
+    ValueError
+        If the spec is invalid.
     """
 
     orig_path = pathlib.Path(args.model_path).resolve()
@@ -272,11 +278,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     setup_file = pathlib.Path(args.setup) if args.setup else work_dir / "setup.py"
 
     if not args.compile_only:
-        increment_backups(model_path)
-        shutil.copytree(orig_path, model_path)
-        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
-
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        # The spec is checked before the sample run, which can take
+        # long, so that a mistake in it fails at once.
         if args.no_spec:
             d = {}
         else:
@@ -286,6 +289,13 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
+        use_libm = spec.get_use_libm()
+
+        increment_backups(model_path)
+        shutil.copytree(orig_path, model_path)
+        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
+
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
@@ -348,6 +358,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
+        math_refs = build_math_refs(module_infos) if use_libm else None
 
         # Phase 3: transform and write out
         for u in units:
@@ -356,6 +367,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 resolver=resolver,
                 cells_kinds=cells_kinds,
                 ref_kinds=ref_kinds,
+                math_refs=math_refs,
             )
             pxd = PXDGenerator(u.module_info)
 

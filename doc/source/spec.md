@@ -37,6 +37,9 @@ dicts of the same shape:
                     {"cells_param_size": {"t": 100}}}}}}
 ```
 
+The top level can also hold the model-wide key `use_libm`
+({ref}`model-wide-keys`).
+
 ## Keys
 
 ### `spaces`
@@ -100,6 +103,40 @@ Maps cells names to per-cells settings.  Currently one setting is defined:
      {"disc_factors": {"return_type": "object"},
       "arr_whole": {"return_type": "memoryview"}}}
 ```
+
+(model-wide-keys)=
+### Model-wide keys
+
+These keys are read from the top level of the spec only.
+
+`use_libm`
+: `True` to compile calls to `math.exp(x)`, `math.log(x)` and
+  `math.pow(x, y)` to calls of the C library functions `exp`, `log` and
+  `pow`.  Off by default.  A call is compiled so when the formula makes
+  it through a reference that holds the `math` module, as
+  `math.exp(...)` in the model (`self.math.exp(...)` in the export), with
+  positional arguments only, one for `exp` and `log` and two for `pow`,
+  that are all provably C numbers by the same rules as for `**`
+  ({ref}`real-valued-powers`).  Other calls, such as the two-argument
+  `math.log(x, base)`, stay Python calls and are logged at `INFO` level.
+
+  Where the arguments and the C result are all finite, the compiled model
+  returns the C result.  On the platform it was measured on — Windows,
+  MSVC 14.37, CPython 3.13 — that result is bit for bit what the `math`
+  function returns, over 3.2 million arguments including subnormal,
+  near-overflow and near-one regions.  In every other case — an infinite
+  or `nan` argument, and the cases where C returns `inf` or `nan` while
+  Python raises: `exp` and `pow` overflowing (`OverflowError`), `log` of
+  zero or of a negative number, `pow` of zero to a negative power and of
+  a negative number to a non-integer power (`ValueError`) — the compiled
+  model calls the `math` function itself, so it returns or raises
+  exactly what Python does.  On another platform, check the results
+  against the `math` module before turning it on.
+
+  ```python
+  {"use_libm": True,
+   "spaces": {...}}
+  ```
 
 (deprecated-keys)=
 ## Deprecated keys

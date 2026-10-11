@@ -63,6 +63,14 @@ class TransSpec:
       warning for ``"memoryview"``) and the return type falls back
       to ``object``.
 
+    The top-level dict, which describes the model, may also have:
+
+    * ``"use_libm"``: ``True`` to compile ``math.exp(x)``,
+      ``math.log(x)`` and ``math.pow(x, y)`` calls, made through a
+      reference to the ``math`` module on arguments that are provably
+      C numbers, to calls of the C library functions (see
+      :meth:`get_use_libm`).  Off by default.
+
     The ``"space_params"`` and ``"param_type"`` keys are defined
     below but are not currently consumed by the pipeline.
 
@@ -87,6 +95,8 @@ class TransSpec:
         memoryview emission.
     PARAM_T : str
         Key ``"param_type"`` (currently unused).
+    USE_LIBM : str
+        Top-level key ``"use_libm"``.
     """
 
     SPACES = "spaces"
@@ -98,6 +108,7 @@ class TransSpec:
     RET_T = "return_type"
     RET_MEMORYVIEW = "memoryview"   # RET_T value forcing memoryview emission
     PARAM_T = "param_type"
+    USE_LIBM = "use_libm"
 
     def __init__(self, data: dict) -> None:
         """Store the spec dictionary.
@@ -173,3 +184,33 @@ class TransSpec:
                     return {}
 
         return data
+
+    def get_use_libm(self) -> bool:
+        """Whether the spec turns on the C library math functions.
+
+        With the top-level ``"use_libm": True``, a call
+        ``self.<ref>.exp(x)``, ``self.<ref>.log(x)`` or
+        ``self.<ref>.pow(x, y)`` in a formula, where ``<ref>`` holds
+        the ``math`` module and every argument is provably a C number,
+        is compiled to a C library call (see
+        :func:`modelx_cython.powers.rewrite_math_calls`).  Where the
+        arguments and the C result are finite, the C result is
+        returned, which on the platform it was measured on (MSVC) is
+        bit for bit what ``math`` returns; everything else -- infinite
+        or nan arguments, overflow, ``log`` of zero or of a negative
+        number, ``pow`` of zero to a negative power or of a negative
+        number to a fractional power -- is computed by the ``math``
+        module itself, so it returns or raises exactly what Python
+        does.
+
+        Raises
+        ------
+        ValueError
+            If the value is not ``True`` or ``False``.
+        """
+        value = self._data.get(self.USE_LIBM, False)
+        if not isinstance(value, bool):
+            raise ValueError(
+                f"invalid value for spec '{self.USE_LIBM}': expected True "
+                f"or False, got {value!r}")
+        return value
