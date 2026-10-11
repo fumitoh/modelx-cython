@@ -27,8 +27,9 @@ static types.  The machinery is built on vendored MonkeyType code in
 The entry point is :func:`trace_calls`, which installs an
 :class:`MxCallTracer`; its caller (:func:`modelx_cython.cli.run_sample`)
 restricts the tracer with an :class:`MxCodeFilter` to formula methods
-(``_f_*``), ``_mx_assign_refs`` and ``__call__`` defined in
-``_mx_model.py`` / ``_mx_classes.py`` modules.  Collected traces are
+(``_f_*``), the public methods of uncached cells, ``_mx_assign_refs``
+and ``__call__`` defined in ``_mx_model.py`` / ``_mx_classes.py``
+modules.  Collected traces are
 accumulated by :class:`MxCallTraceLogger`, whose :meth:`flush` distills
 them into :class:`RuntimeCellsInfo`, :class:`RuntimeRefInfo` and
 :class:`RuntimeParamInfo` objects consumed by
@@ -36,13 +37,14 @@ them into :class:`RuntimeCellsInfo`, :class:`RuntimeRefInfo` and
 """
 
 import sys
+import inspect
 import pathlib
 import random
 import numbers
 import itertools
 from dataclasses import dataclass
 from contextlib import contextmanager
-from types import FrameType, MemberDescriptorType
+from types import CodeType, FrameType, MemberDescriptorType, ModuleType
 from typing import Any, Mapping, Iterator, Sequence, Optional, Dict, List
 import logging
 
@@ -80,6 +82,23 @@ if (3, 12) <= sys.version_info < (3, 14):
 
 _logger = logging.getLogger(__name__)
 
+_MAX_VALUE_REPR = 40
+
+
+def _describe_types(type_val: Mapping[type, Any]) -> str:
+    """``"int 1, float 2.0"``: each observed type with one value of it.
+
+    Long or multi-line values (arrays, DataFrames) are shortened, so
+    that a log line stays one line.
+    """
+    def short(val):
+        text = " ".join(str(val).split())
+        if len(text) > _MAX_VALUE_REPR:
+            text = text[:_MAX_VALUE_REPR - 3] + "..."
+        return text
+
+    return ', '.join(k.__name__ + " " + short(v) for k, v in type_val.items())
+
 
 @dataclass
 class ReturnTypeInfo:
@@ -106,13 +125,16 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
     """Aggregate runtime type information for one cells method.
 
     Built from all :class:`CallTrace` records collected for a single
-    traced method (normally a cells formula method, ``_f_*``).  Argument types are merged across traces:
+    traced method: a cells formula method (``_f_*``), the public
+    method of an uncached cells, which is the formula itself, or a
+    space's ``__call__``.  Argument types are merged across traces:
     a single observed type is kept as-is; multiple integral types widen
     to :class:`numbers.Integral`; multiple ``str`` subclasses collapse
-    to ``str``; any other mixture falls back to ``object`` (logging a
-    message when integral and non-integral values are mixed).  For
-    integral arguments, the largest observed value is recorded in
-    ``max_args``.
+    to ``str``; ``float`` and its subclasses (``numpy.float64``) widen
+    to :class:`numbers.Real`; any other mixture, integers with floats
+    and floats with ``numpy.float32`` included, falls back to
+    ``object``, and each such fallback is logged.  For integral arguments, the
+    largest observed value is recorded in ``max_args``.
 
     Return types are merged pairwise across traces: equal types are
     kept; arrays of equal ``ndim`` have their element types widened to
@@ -172,21 +194,23 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
         return bool(len(self.arg_types))
 
     def _init_arg_types(self, traces):
-        """Merge observed argument types into arg_types and max_args."""
+        """Merge observed argument types into arg_types and max_args.
+
+        Per argument: one observed type is kept as is; integral types
+        only widen to :class:`numbers.Integral`; ``str`` subclasses
+        only collapse to ``str``; ``float`` and its subclasses only
+        (e.g. ``float`` and ``numpy.float64``, both C doubles) widen to
+        :class:`numbers.Real`.  Any other mixture, notably integers
+        mixed with floats, or floats mixed with another real type such
+        as ``numpy.float32`` or ``fractions.Fraction`` whose arithmetic
+        is not that of a double, falls back to ``object``, and every
+        such fallback is logged at INFO with one value of each observed
+        type.
+        """
         arg_type_val: Dict[str, dict[type, Any]] = {}
 
         for trace in traces:
-
-            for arg, val in itertools.islice(
-                trace.arg_vals.items(), 1, None
-            ):  # remove self
-                tp = type(val)
-                types = arg_type_val.setdefault(arg, {})
-                if tp not in types:
-                    types[tp] = val
-                elif issubclass(tp, numbers.Integral):
-                    if val > types[tp]:
-                        types[tp] = val
+            _add_arg_vals(arg_type_val, trace)
 
         for arg, type_val in arg_type_val.items():
 
@@ -203,104 +227,179 @@ class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
             elif all(issubclass(tp, str) for tp in type_val.keys()):
                 self.arg_types[arg] = str
 
+            elif all(issubclass(tp, float) for tp in type_val.keys()):
+                # float and its subclasses, such as numpy.float64, are C
+                # doubles, so the argument is typed double.  Other real
+                # types, such as numpy.float32, numpy.longdouble or
+                # fractions.Fraction, compute differently from a double.
+                self.arg_types[arg] = numbers.Real
+                _logger.debug(
+                    f"floating types given to argument '{arg}' in "
+                    f"{self.fqname} are typed double: "
+                    f"{_describe_types(type_val)}")
+
             else:
                 if (any(issubclass(tp, numbers.Integral) for tp in type_val.keys()) and
-                        any(not issubclass(tp, numbers.Integral) for tp in type_val.keys())):
-                    msg = ', '.join(k.__name__ + " " + str(v) for k, v in type_val.items())
-                    _logger.info(f"varying types given to argument '{arg}' in {self.fqname}: {msg}")
+                        all(issubclass(tp, numbers.Real) for tp in type_val.keys())):
+                    # Typing double would turn integers into floats, and
+                    # typing long long would truncate the floats
+                    reason = "typed object: integral and non-integral numbers"
+                elif all(issubclass(tp, numbers.Real) for tp in type_val.keys()):
+                    reason = ("typed object: real types that are not all "
+                              "float")
+                else:
+                    reason = "typed object"
+                _logger.info(
+                    f"varying types given to argument '{arg}' in "
+                    f"{self.fqname}: {_describe_types(type_val)} ({reason})")
 
                 self.arg_types[arg] = object
 
     def _init_ret_type(self, traces):
         """Merge observed return types into one ReturnTypeInfo,
         widening or falling back to ``object`` as described in the
-        class docstring."""
-        last_tp = None
-        last_args = None
-        has_last = False
-        was_dtype_logged = False
-        was_ndim_logged = False
-        was_vtype_logged = False
-        was_mixed_logged = False
-
-        def get_arg_expr(args):
-            return ", ".join(f"{k}={str(v)}" for k, v in itertools.islice(args.items(), 1, None))
-
+        class docstring (see :class:`_ReturnTypeMerger`)."""
+        merger = _ReturnTypeMerger(self.fqname)
         for tr in traces:
-            val = tr.ret_val
-            if isinstance(val, np.ndarray):
-                tp = ReturnTypeInfo(
-                    val.dtype.type, is_array=True, ndim=val.ndim
-                )
+            merger.add(tr)
+        return merger.ret_type
+
+
+def _add_arg_vals(arg_type_val: Dict[str, Dict[type, Any]], trace) -> bool:
+    """Record the argument values of ``trace`` in ``arg_type_val``.
+
+    ``arg_type_val`` maps each argument, ``self`` excluded, to its
+    observed types, each mapped to the value quoted for it: the first
+    value seen, or for an integral type the largest.  Returns whether
+    ``arg_type_val`` changed: a new type, or a larger integral value.
+    """
+    changed = False
+    for arg, val in itertools.islice(trace.arg_vals.items(), 1, None):
+        tp = type(val)
+        types = arg_type_val.setdefault(arg, {})
+        if tp not in types:
+            types[tp] = val
+            changed = True
+        elif issubclass(tp, numbers.Integral):
+            if val > types[tp]:
+                types[tp] = val
+                changed = True
+    return changed
+
+
+class _ReturnTypeMerger:
+    """Merge the return types of a method's traces, one by one.
+
+    The merge of :class:`RuntimeCellsInfo` (see its docstring), held as
+    a state that each trace updates, so that
+    :meth:`MxCallTraceLogger.log` can tell a trace that changes nothing.
+    Each kind of fallback is logged at most once, quoting the arguments
+    of the first trace and of the trace that caused it.
+
+    Parameters
+    ----------
+    fqname : str
+        Name of the method, for the log messages.
+    log : bool, default True
+        False to merge without logging, as the trace logger does.
+    """
+
+    def __init__(self, fqname, log=True):
+        self.fqname = fqname
+        self.log = log
+        self.ret_type: Optional[ReturnTypeInfo] = None
+        self._first_args = None
+        self._logged = set()
+
+    @staticmethod
+    def _arg_expr(args):
+        return ", ".join(f"{k}={str(v)}"
+                         for k, v in itertools.islice(args.items(), 1, None))
+
+    def _fallback(self, kind, tr, msg0, msg1):
+        """Log the fallback ``kind`` unless already logged; return
+        whether it was logged now."""
+        if kind in self._logged:
+            return False
+        self._logged.add(kind)
+        if self.log:
+            args0 = self._arg_expr(self._first_args)
+            args1 = self._arg_expr(tr.arg_vals)
+            _logger.info(f"varying {kind} returned from {self.fqname}:"
+                         f"{msg0} for {args0} and {msg1} for {args1}")
+        return True
+
+    def add(self, tr) -> bool:
+        """Merge the return value of trace ``tr``.
+
+        Returns
+        -------
+        bool
+            Whether the merge changed: the merged type, or a fallback
+            logged for the first time.  A trace for which it is False
+            can be left out without changing the merged type or the
+            messages logged.
+        """
+        val = tr.ret_val
+        if isinstance(val, np.ndarray):
+            tp = ReturnTypeInfo(val.dtype.type, is_array=True, ndim=val.ndim)
+        else:
+            tp = ReturnTypeInfo(type(val))
+
+        last_tp = self.ret_type
+        if last_tp is None:
+            self.ret_type = tp
+            self._first_args = tr.arg_vals
+            return True
+        if last_tp == tp:
+            return False
+
+        before = (last_tp.value_type, last_tp.is_array, last_tp.ndim)
+        logged = False
+        if last_tp.is_array and tp.is_array:
+            if last_tp.ndim == tp.ndim:
+                assert last_tp.value_type != tp.value_type
+                if (issubclass(last_tp.value_type, numbers.Integral)
+                        and issubclass(tp.value_type, numbers.Integral)):
+                    last_tp.value_type = numbers.Integral
+                elif (issubclass(last_tp.value_type, numbers.Real)
+                      and issubclass(tp.value_type, numbers.Real)):
+                    last_tp.value_type = numbers.Real
+                else:
+                    logged = self._fallback(
+                        "array types", tr, last_tp.value_type.__name__,
+                        tp.value_type.__name__)
+                    last_tp.value_type = object
             else:
-                tp = ReturnTypeInfo(type(val))
+                logged = self._fallback(
+                    "array dimensions", tr, last_tp.ndim, tp.ndim)
+                self.ret_type = ReturnTypeInfo(object)
 
-            if has_last:
-                if last_tp == tp:
-                    continue
-                elif last_tp.is_array and tp.is_array:
-                    if last_tp.ndim == tp.ndim:
-                        assert last_tp.value_type != tp.value_type
-                        if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
-                            last_tp.value_type = numbers.Integral
-                        elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
-                            last_tp.value_type = numbers.Real
-                        else:
-                            if not was_dtype_logged:
-                                # Log varying return types with their arguments
-                                args0 = get_arg_expr(last_args)
-                                args1 = get_arg_expr(tr.arg_vals)
-                                msg0 = f"{last_tp.value_type.__name__} for {args0}"
-                                msg1 = f"{tp.value_type.__name__} for {args1}"
-                                _logger.info(f"varying array types returned from {self.fqname}:{msg0} and {msg1}")
-                                was_dtype_logged = True
-
-                            last_tp.value_type = object
-
-                    else:
-                        if not was_ndim_logged:
-                            args0 = get_arg_expr(last_args)
-                            args1 = get_arg_expr(tr.arg_vals)
-                            msg0 = f"{last_tp.ndim} for {args0}"
-                            msg1 = f"{tp.ndim} for {args1}"
-                            _logger.info(f"varying array dimensions returned from {self.fqname}:{msg0} and {msg1}")
-                            was_ndim_logged = True
-
-                        last_tp = ReturnTypeInfo(object)
-
-                elif not last_tp.is_array and not tp.is_array:
-
-                    if issubclass(last_tp.value_type, numbers.Integral) and issubclass(tp.value_type, numbers.Integral):
-                        last_tp.value_type = numbers.Integral
-                    elif issubclass(last_tp.value_type, numbers.Real) and issubclass(tp.value_type, numbers.Real):
-                        last_tp.value_type = numbers.Real
-                    else:
-                        if not was_vtype_logged:
-                            args0 = get_arg_expr(last_args)
-                            args1 = get_arg_expr(tr.arg_vals)
-                            msg0 = f"{last_tp.value_type.__name__} for {args0}"
-                            msg1 = f"{tp.value_type.__name__} for {args1}"
-                            _logger.info(f"varying types returned from {self.fqname}:{msg0} and {msg1}")
-                            was_vtype_logged = True
-                        last_tp.value_type = object
-
-                else:   # one is an array, the other is not
-                    if not was_mixed_logged:
-                        args0 = get_arg_expr(last_args)
-                        args1 = get_arg_expr(tr.arg_vals)
-                        msg0 = f"{'array of ' if last_tp.is_array else ''}{last_tp.value_type.__name__} for {args0}"
-                        msg1 = f"{'array of ' if tp.is_array else ''}{tp.value_type.__name__} for {args1}"
-                        _logger.info(f"varying array and non-array types returned from {self.fqname}:{msg0} and {msg1}")
-                        was_mixed_logged = True
-
-                    last_tp = ReturnTypeInfo(object)
-
+        elif not last_tp.is_array and not tp.is_array:
+            if (issubclass(last_tp.value_type, numbers.Integral)
+                    and issubclass(tp.value_type, numbers.Integral)):
+                last_tp.value_type = numbers.Integral
+            elif (issubclass(last_tp.value_type, numbers.Real)
+                  and issubclass(tp.value_type, numbers.Real)):
+                last_tp.value_type = numbers.Real
             else:
-                last_tp = tp
-                last_args = tr.arg_vals
-                has_last = True
+                logged = self._fallback(
+                    "types", tr, last_tp.value_type.__name__,
+                    tp.value_type.__name__)
+                last_tp.value_type = object
 
-        return last_tp
+        else:   # one is an array, the other is not
+            def describe(t):
+                return (f"{'array of ' if t.is_array else ''}"
+                        f"{t.value_type.__name__}")
+            logged = self._fallback(
+                "array and non-array types", tr, describe(last_tp),
+                describe(tp))
+            self.ret_type = ReturnTypeInfo(object)
+
+        after = (self.ret_type.value_type, self.ret_type.is_array,
+                 self.ret_type.ndim)
+        return logged or after != before
 
 
 class RuntimeValueInfo:
@@ -314,12 +413,19 @@ class RuntimeValueInfo:
         Fully qualified name of the value's class when it is defined
         inside the traced model package (i.e. a modelx object),
         otherwise an empty string.
+    module_name : str
+        The ``__name__`` of the value when it is a module, such as
+        ``"math"`` for a reference to the math module, otherwise an
+        empty string.
     """
 
     def __init__(self, value, mx_class=''):
         """Record the type of ``value`` and an optional class name."""
         self.type_ = type(value)
         self.mx_class = mx_class
+        self.module_name = (
+            getattr(value, "__name__", "")
+            if isinstance(value, ModuleType) else "")
 
     @classmethod
     def init_mxobj(cls, value, module):
@@ -560,8 +666,9 @@ class MxCallTracer(CallTracer):
         ):
             return self
 
-        # Filter by module name here
-        func = get_func(frame)
+        # Filter by module name here.  The function is resolved once per
+        # code object: an uncached cells is traced on every call.
+        func = self._get_func(frame)
         if not func or not func.__module__.split(".")[0] == self.module:
             return self
 
@@ -577,14 +684,61 @@ class MxCallTracer(CallTracer):
         return self
 
 
+def is_uncached_cells_code(code: CodeType) -> bool:
+    """Whether a code object is the public method of an uncached cells.
+
+    modelx exports a cached cells as a ``_f_<name>`` formula method plus
+    a public ``<name>`` method that looks up the cache and calls
+    ``self._f_<name>`` on a miss.  An uncached cells has no ``_f_``
+    method: its public ``<name>`` method is the formula itself.  So a
+    method with a user-defined name whose code does not refer to
+    ``_f_<name>`` is an uncached cells, provided it is a method defined
+    directly in a space class (first parameter ``self``; on Python 3.11
+    and later also a qualified name ``_c_<Space>.<name>``) and not a
+    function nested in a formula, nor a lambda or generator expression,
+    whose names are not identifiers.  A formula cannot refer to
+    ``_f_<name>`` itself, because modelx names never start with an
+    underscore.
+
+    Parameters
+    ----------
+    code : types.CodeType
+        A code object defined in an ``_mx_classes.py`` or
+        ``_mx_model.py`` module.
+    """
+    name = code.co_name
+    qualname = getattr(code, "co_qualname", None)   # Python 3.11+
+    if qualname is not None:
+        # a method defined directly in a space class
+        parts = qualname.split(".")
+        if len(parts) != 2 or parts[0][:len(SPACE_PREF)] != SPACE_PREF:
+            return False
+    return bool(
+        name.isidentifier()
+        and is_user_defined(name)
+        and not code.co_flags & inspect.CO_NESTED
+        and code.co_argcount >= 1
+        and code.co_varnames[0] == MX_SELF
+        and FORMULA_PREF + name not in code.co_names
+    )
+
+
 class MxCodeFilter:
     """Code filter selecting modelx model code objects to trace.
 
-    Accepts only code objects whose function name is a formula
-    (``_f_*``), ``_mx_assign_refs``, or ``__call__``, and whose file
-    name ends with ``_mx_model.py`` or ``_mx_classes.py`` (only a
-    filename-suffix comparison is performed, for speed).
+    Accepts only code objects whose file name ends with
+    ``_mx_model.py`` or ``_mx_classes.py`` (only a filename-suffix
+    comparison is performed, for speed), and whose function is a
+    formula (``_f_*``), ``_mx_assign_refs``, ``__call__``, or the
+    public method of an uncached cells
+    (see :func:`is_uncached_cells_code`).  The public methods of cached
+    cells are not traced: they are called on every cache hit, and their
+    ``_f_`` formulas already carry the types.
     """
+
+    def __init__(self):
+        # code object -> is_uncached_cells_code(code), as computed once
+        self._public = {}
 
     def __call__(self, code):
         """Return ``True`` if the code object should be traced."""
@@ -599,6 +753,11 @@ class MxCodeFilter:
                 return True
             elif code.co_name == "__call__":
                 return True
+            else:
+                result = self._public.get(code)
+                if result is None:
+                    result = self._public[code] = is_uncached_cells_code(code)
+                return result
 
         return False
 
@@ -644,6 +803,9 @@ class MxCallTraceLogger(CallTraceLogger):
         self.module = module
         self.new_name = new_model_name
         self._traces = {}  # funcname -> [trace]
+        # funcname -> (argument types and values, return type merger) of
+        # the traces kept: see log
+        self._kept = {}
         self.cells_info = {}  # funcname -> MethodTypeInfo
         self.ref_info = {}
         self.modules = []
@@ -653,9 +815,31 @@ class MxCallTraceLogger(CallTraceLogger):
         """Log a single call trace.
 
         The trace is appended to an internal list keyed by its fully
-        qualified function name, for aggregation in :meth:`flush`.
+        qualified function name, for aggregation in :meth:`flush`,
+        unless it changes nothing that :class:`RuntimeCellsInfo` derives
+        from the traces: the logger keeps, per function, the state that
+        :class:`RuntimeCellsInfo` builds from the traces kept so far --
+        each argument's observed types with the value quoted for each
+        (see :func:`_add_arg_vals`), and the merged return type with the
+        fallbacks logged (see :class:`_ReturnTypeMerger`) -- and drops a
+        trace that leaves both unchanged.  The first trace is always
+        kept.  Since a dropped trace changes nothing, what
+        :class:`RuntimeCellsInfo` derives from the kept traces is exactly
+        what it derives from all of them, including its log messages and
+        the values they quote, while a function called many times with
+        the same types -- an uncached cells is called on every use --
+        keeps only a few traces alive.
         """
-        self._traces.setdefault(trace.funcname, []).append(trace)
+        name = trace.funcname
+        state = self._kept.get(name)
+        if state is None:
+            state = self._kept[name] = (
+                {}, _ReturnTypeMerger(name, log=False))
+        arg_type_val, merger = state
+        args_changed = _add_arg_vals(arg_type_val, trace)
+        ret_changed = merger.add(trace)
+        if args_changed or ret_changed:
+            self._traces.setdefault(name, []).append(trace)
 
     def flush(self) -> None:
         """Aggregate the accumulated traces into runtime info objects.
@@ -663,10 +847,13 @@ class MxCallTraceLogger(CallTraceLogger):
         Traces of ``_mx_assign_refs`` provide refs: each user-defined
         attribute of the traced ``self`` (taken from the first trace
         only) becomes a :class:`RuntimeRefInfo` in ``ref_info``.  All
-        other traces (formula methods and space ``__call__`` methods
-        admitted by the code filter) are treated as cells: each group
-        builds a :class:`RuntimeCellsInfo` in ``cells_info`` and
-        registers its module in ``modules``.  The raw traces are then cleared,
+        other traces (formula methods, space ``__call__`` methods and
+        the public methods of uncached cells admitted by the code
+        filter) are treated as cells: each group builds a
+        :class:`RuntimeCellsInfo` in ``cells_info`` and registers its
+        module in ``modules``.  A public method is kept only if it is
+        defined directly in a space class (qualified name
+        ``_c_<Space>.<name>``).  The raw traces are then cleared,
         itemspace parameters are collected by walking the model, and,
         if a new model name was given, the model root component of all
         stored names is renamed to it.
@@ -682,12 +869,19 @@ class MxCallTraceLogger(CallTraceLogger):
                         fqname = ".".join(name_split[:-1] + [name])
                         self.ref_info[fqname] = RuntimeRefInfo.init_mxobj(val, self.module)
             else:
+                if is_user_defined(name_split[-1]):
+                    # The public method of an uncached cells
+                    qualname = tr0.func.__qualname__.split(".")
+                    if not (len(qualname) == 2
+                            and qualname[0][:len(SPACE_PREF)] == SPACE_PREF):
+                        continue
                 # Extract cells
                 self.cells_info[k] = info = RuntimeCellsInfo(v)
                 if info.module not in self.modules:
                     self.modules.append(info.module)
 
         self._traces.clear()
+        self._kept.clear()
         self._get_params()
 
         if self.new_name:

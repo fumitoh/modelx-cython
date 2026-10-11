@@ -1,5 +1,6 @@
 from libc.math cimport (
-    pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite)
+    pow as _mx_c_pow, floor as _mx_c_floor, isfinite as _mx_c_isfinite,
+    exp as _mx_c_exp, log as _mx_c_log)
 
 
 cdef inline double _mx_pow(double b, double e) except? -1.0:
@@ -29,6 +30,43 @@ cdef inline double _mx_pow(double b, double e) except? -1.0:
         if b == 0.0 and e < 0.0:
             raise ZeroDivisionError("0.0 cannot be raised to a negative power")
     return _mx_c_pow(b, e)
+
+
+# math.exp, math.log and math.pow on C doubles, through the C library.
+# Used only where the spec sets "use_libm" (see modelx_cython.powers).
+# Where the inputs and the C result are all finite, the C result is
+# returned: bit for bit what CPython's math module returns, as measured
+# with MSVC and as follows where CPython calls the same C functions.
+# Every other case -- an infinite or nan input, and the overflow, pole
+# and domain errors where C returns inf or nan and Python raises
+# OverflowError or ValueError -- is handed to Python's math module, so
+# that it returns or raises exactly what Python does.
+
+cdef inline double _mx_exp(double x) except? -1.0:
+    """``math.exp(x)``; see above."""
+    cdef double r = _mx_c_exp(x)
+    if _mx_c_isfinite(x) and _mx_c_isfinite(r):
+        return r
+    import math
+    return math.exp(x)
+
+
+cdef inline double _mx_log(double x) except? -1.0:
+    """``math.log(x)`` with one argument; see above."""
+    cdef double r = _mx_c_log(x)
+    if _mx_c_isfinite(x) and _mx_c_isfinite(r):
+        return r
+    import math
+    return math.log(x)
+
+
+cdef inline double _mx_math_pow(double x, double y) except? -1.0:
+    """``math.pow(x, y)``, which is not ``x ** y``; see above."""
+    cdef double r = _mx_c_pow(x, y)
+    if _mx_c_isfinite(x) and _mx_c_isfinite(y) and _mx_c_isfinite(r):
+        return r
+    import math
+    return math.pow(x, y)
 
 
 cdef extern from *:
