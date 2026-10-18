@@ -380,9 +380,11 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
 
         # Every check has passed: only now is the previous output rotated
         # and the model copied, so that an error above leaves the
-        # previous output in place.
+        # previous output in place.  The sample run above imported the
+        # original model, so its __pycache__ directories are not copied.
         increment_backups(model_path)
-        shutil.copytree(orig_path, model_path)
+        shutil.copytree(orig_path, model_path,
+                        ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
         # Phase 3: transform and write out
