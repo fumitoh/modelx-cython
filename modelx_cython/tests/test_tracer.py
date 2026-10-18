@@ -1,4 +1,5 @@
 import logging
+import sys
 import types
 
 import numpy as np
@@ -263,6 +264,13 @@ def test_code_filter_admits_uncached_cells_only():
     codes = compiled_codes("C:/model/Model_nomx/_mx_classes.py")
     filt = MxCodeFilter()
     admitted = {k for k, code in codes.items() if filt(code)}
+    if sys.version_info < (3, 11):
+        # Without co_qualname (added in Python 3.11), a module-level
+        # function whose first parameter is ``self`` cannot be told from
+        # a method, so its exclusion is asserted on 3.11 and later only.
+        # Exported _mx_classes.py and _mx_model.py modules define no
+        # module-level functions, so this does not arise in practice.
+        admitted.discard("module_func")
     assert admitted == {
         "_c_Space1._f_cached",
         "_c_Space1.uncached",
@@ -270,7 +278,10 @@ def test_code_filter_admits_uncached_cells_only():
         "_c_Space1._mx_assign_refs",
     }
     # decided once per code object, and the same again
-    assert {k for k, code in codes.items() if filt(code)} == admitted
+    again = {k for k, code in codes.items() if filt(code)}
+    if sys.version_info < (3, 11):
+        again.discard("module_func")
+    assert again == admitted
 
 
 def test_code_filter_ignores_other_modules():

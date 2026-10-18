@@ -641,7 +641,9 @@ def is_uncached_cells_code(code: CodeType) -> bool:
     function nested in a formula, nor a lambda or generator expression,
     whose names are not identifiers.  A formula cannot refer to
     ``_f_<name>`` itself, because modelx names never start with an
-    underscore.
+    underscore.  Before Python 3.11 a module-level function whose first
+    parameter is ``self`` passes these tests too; exported
+    ``_mx_classes.py`` and ``_mx_model.py`` modules define none.
 
     Parameters
     ----------
