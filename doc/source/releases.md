@@ -1,5 +1,52 @@
 # Release Notes
 
+## Unreleased
+
+### Uncached cells are typed
+
+Cells that modelx exports as uncached have no `_f_` formula method: their
+public method is the formula itself.  The tracer recorded `_f_` methods
+only, so such a cells compiled as `cpdef object name(self, object ...)`,
+with its body running on Python objects, and every compiled caller paid
+for a Python call.  The tracer now records the public methods of uncached
+cells too, and they get argument and return types by the same rules as
+cached cells and a typed `cpdef` without a cache, which compiled callers
+call through the vtable with C arguments.  The existing fallbacks apply
+to them: keyword calls and closures keep a plain Python method, and an
+untraced uncached cells stays `object`.  A trace that changes nothing
+that the type summary derives from the traces kept so far is now dropped
+as it arrives, so that uncached cells, which run on every call, do not
+grow the memory of the sample run; the types and the messages logged are
+those all the traces give.
+
+Typing an uncached cells changes what Python callers of it get, as it
+does for a cached cells:
+
+* An `int` passed to a parameter the sample passed only floats to
+  arrives as a `float`, so `f(2, 3)` can return `6.0` where the exported
+  model returns `6`; and an uncached cells that returned both integers
+  and floats in the sample now returns `float`.
+* A `float` passed to a parameter the sample passed only integers to, or
+  returned where the sample saw only integers, is converted to a C
+  `long long`, which Cython truncates silently.
+* A real array returned by an uncached cells whose only uses inside the
+  model are element access is now a memoryview, as it is for a cached
+  cells.  One that no formula of the model uses is still returned as the
+  array.
+
+### Type inference
+
+* A parameter is typed `object` when its default value is not a literal
+  of its traced type (`y=None` for a `double`, `k=0.5` for a
+  `long long`), or when the formula binds it to a value not provably of
+  that type (`rate = rate / 100` for a `long long`, `t /= 2`).  Before,
+  the first two and the third failed to compile, and the last compiled
+  and truncated the quotient.  For a cached cells the parameter is
+  `object` in its `_f_` formula only, and the cache keeps its C array.
+  Each such parameter is logged at `INFO` level.
+
+See {doc}`architecture`.
+
 ## v0.1.0 (5 September 2026)
 
 This release supports the two export options that
