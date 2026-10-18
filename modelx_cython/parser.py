@@ -102,16 +102,23 @@ class LexicalCellsInfo(LexicalBaseMemberInfo):
     params_with_defaults : Sequence[str]
         Names of the parameters in ``params`` that have default
         values in the formula signature.
+    param_defaults : Mapping[str, cst.BaseExpression]
+        The default value expression of each parameter in
+        ``params_with_defaults``, as parsed.
     """
 
     params: Sequence[str]
     params_with_defaults: Sequence[str]
+    param_defaults: Mapping[str, cst.BaseExpression]
 
-    def __init__(self, module, cls, name, params, params_with_defaults=()) -> None:
+    def __init__(self, module, cls, name, params, params_with_defaults=(),
+                 param_defaults=None) -> None:
         """Store identifying names and the parameter name lists."""
         super().__init__(module, cls, name)
         self.params: Sequence[str] = params
         self.params_with_defaults: Sequence[str] = params_with_defaults
+        self.param_defaults: Mapping[str, cst.BaseExpression] = (
+            param_defaults or {})
 
     def is_special(self):
         """Return whether the cells name is a special (dunder) name.
@@ -135,6 +142,16 @@ class LexicalCellsInfo(LexicalBaseMemberInfo):
         pref = "" if self.is_special() else FORMULA_PREF
         result = self.module + "." + self.cls + "." + pref + self.name
         return result
+
+    @cached_property
+    def method_fqname(self):
+        """Fully-qualified name of the cells' public method.
+
+        Returns ``"<module>.<cls>.<name>"``.  For an uncached cells,
+        which has no ``_f_`` method, this is the method that holds the
+        formula and that the tracer records.
+        """
+        return self.module + "." + self.cls + "." + self.name
 
 
 class LexicalRefInfo(LexicalBaseMemberInfo):
@@ -231,6 +248,12 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
     generator_funcs : dict
         Maps each space class name to the set of ``_f_`` method names
         containing a ``yield``.
+    param_rebinds : dict
+        Maps each space class name to a dict mapping the name of each
+        cells method (``_f_<name>`` or the public ``<name>``) whose body
+        binds one of its parameters again to a dict mapping that
+        parameter to what the body binds to it, as collected by
+        :func:`collect_param_rebinds`.
     locked_classes : set of str
         Names of the classes whose ``__init__`` assigns ``self._mx_lock``:
         the spaces that modelx exported with ``locked_spaces``, whose
@@ -263,6 +286,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         self.formula_defs = {}  # {class_name: set of cells names with _f_ defs}
         self.closure_funcs = {}  # {class_name: set of method names containing closures}
         self.generator_funcs = {}  # {class_name: set of method names containing yield}
+        self.param_rebinds = {}  # {class_name: {method name: {param: [binding]}}}
         self.locked_classes = set()  # classes whose __init__ assigns self._mx_lock
         self.wrapper = cst.metadata.MetadataWrapper(cst.parse_module(source))
         self.wrapper.visit(self)
@@ -386,8 +410,10 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
         ``_f_`` method, the corresponding cells name in
         ``formula_defs`` (and the ``_f_``-prefixed method name in
         ``generator_funcs`` when it contains ``yield``), cells whose
-        bodies contain closures in ``closure_funcs``, and parameters
-        with default values in the cells' ``params_with_defaults``."""
+        bodies contain closures in ``closure_funcs``, parameters
+        with default values in the cells' ``params_with_defaults``
+        and ``param_defaults``, and, for ``_f_`` and cells methods, the
+        parameters their bodies bind again in ``param_rebinds``."""
 
         if self.is_space_scope(original_node):
             cls_name = cst.ensure_type(
@@ -402,6 +428,7 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
                     name[len(FORMULA_PREF):])
                 if self._is_generator(original_node):
                     self.generator_funcs.setdefault(cls_name, set()).add(name)
+                self._collect_rebinds(cls_name, original_node)
             elif original_node.name.value[: len(GLOBAL_PREF)] == GLOBAL_PREF:
                 # _mx_ methods
                 pass
@@ -426,17 +453,221 @@ class ModuleVisitor(m.MatcherDecoratableVisitor, ParentScopeAddin):
                 ]
                 if self._has_closure(original_node):
                     self.closure_funcs.setdefault(cls_name, set()).add(name)
+                self._collect_rebinds(cls_name, original_node)
 
                 ci = LexicalCellsInfo(
                     module=self.module,
                     cls=cls_name,
                     name=name,
                     params=params,
-                    params_with_defaults=params_with_defaults
+                    params_with_defaults=params_with_defaults,
+                    param_defaults={p.name.value: p.default
+                                    for p in param_nodes
+                                    if p.default is not None},
                 )
                 self.cells_info.setdefault(cls_name, {})[name]  = ci
 
         return False
+
+    def _collect_rebinds(self, cls_name, funcdef: cst.FunctionDef):
+        """Record in ``param_rebinds`` what the body of ``funcdef``
+        binds to its parameters, if anything."""
+        params = [p.name.value
+                  for p in funcdef.params.params + funcdef.params.posonly_params
+                  if p.name.value != MX_SELF]
+        rebinds = collect_param_rebinds(funcdef, params)
+        if rebinds:
+            self.param_rebinds.setdefault(cls_name, {})[
+                funcdef.name.value] = rebinds
+
+
+# ---------------------------------------------------------------------------
+# Parameters a formula binds again
+#
+# A cells parameter is declared with the C type of the values the sample
+# passed to it.  If the formula then binds the parameter to a value of
+# another type -- ``rate = rate / 100`` for an integer ``rate`` --
+# Cython rejects the formula ("Cannot assign type 'double' to 'long
+# long'"), or, for ``t /= 2``, silently truncates the result.  The
+# builder therefore types such a parameter ``object`` in the formula
+# unless every value bound to it is provably of its C type (see
+# :func:`modelx_cython.powers.demote_rebound_params`); this collects the
+# bindings.
+
+_AUG_OPS = {
+    cst.AddAssign: cst.Add,
+    cst.SubtractAssign: cst.Subtract,
+    cst.MultiplyAssign: cst.Multiply,
+    cst.DivideAssign: cst.Divide,
+    cst.FloorDivideAssign: cst.FloorDivide,
+    cst.ModuloAssign: cst.Modulo,
+    cst.PowerAssign: cst.Power,
+}
+
+
+class _ParamRebinds(cst.CSTVisitor):
+    """Collect the bindings of a function body to the names in
+    ``params``.  See :func:`collect_param_rebinds`."""
+
+    def __init__(self, params):
+        super().__init__()
+        self.params = frozenset(params)
+        self.rebinds = {}
+        self._nested = 0    # inside a nested def, class or lambda
+        self._comp = 0      # inside a comprehension
+
+    def _bind(self, name, value):
+        if name in self.params:
+            self.rebinds.setdefault(name, []).append(value)
+
+    def _bind_target(self, target, value, what):
+        """Record what ``target`` binds: ``value`` for a name bound
+        to a value the formula's own scope evaluates, else ``what``."""
+        if self._nested:
+            return  # the name is local to the nested scope
+        if isinstance(target, cst.Name):
+            if value is None or self._comp:
+                value = what
+            self._bind(target.value, value)
+        elif isinstance(target, (cst.Tuple, cst.List)):
+            for element in target.elements:
+                self._bind_target(element.value, None, "unpacking")
+        elif isinstance(target, cst.StarredElement):
+            self._bind_target(target.value, None, "unpacking")
+        # an attribute or a subscript binds no name
+
+    # nested scopes: their own bindings do not rebind the parameters
+
+    def visit_FunctionDef(self, node):
+        if not self._nested:
+            self._bind(node.name.value, "a nested def")
+        self._nested += 1
+
+    def leave_FunctionDef(self, original_node):
+        self._nested -= 1
+
+    def visit_ClassDef(self, node):
+        if not self._nested:
+            self._bind(node.name.value, "a nested class")
+        self._nested += 1
+
+    def leave_ClassDef(self, original_node):
+        self._nested -= 1
+
+    def visit_Lambda(self, node):
+        self._nested += 1
+
+    def leave_Lambda(self, original_node):
+        self._nested -= 1
+
+    def _enter_comp(self, node):
+        self._comp += 1
+
+    def _leave_comp(self, original_node):
+        self._comp -= 1
+
+    visit_ListComp = visit_SetComp = visit_DictComp = visit_GeneratorExp = (
+        _enter_comp)
+    leave_ListComp = leave_SetComp = leave_DictComp = leave_GeneratorExp = (
+        _leave_comp)
+
+    # bindings
+
+    def visit_Assign(self, node):
+        for target in node.targets:
+            self._bind_target(target.target, node.value, "an assignment")
+
+    def visit_AnnAssign(self, node):
+        self._bind_target(node.target, None, "an annotated assignment")
+
+    def visit_AugAssign(self, node):
+        op = _AUG_OPS.get(type(node.operator))
+        value = None
+        if op is not None and isinstance(node.target, cst.Name):
+            value = cst.BinaryOperation(
+                left=cst.Name(node.target.value), operator=op(),
+                right=node.value)
+        self._bind_target(node.target, value, "an augmented assignment")
+
+    def visit_NamedExpr(self, node):
+        self._bind_target(node.target, node.value, "an assignment expression")
+
+    def visit_For(self, node):
+        self._bind_target(node.target, None, "a for loop")
+
+    def visit_CompFor(self, node):
+        self._bind_target(node.target, None, "a comprehension")
+
+    def visit_WithItem(self, node):
+        if node.asname is not None:
+            self._bind_target(node.asname.name, None, "a with statement")
+
+    def visit_ExceptHandler(self, node):
+        if node.name is not None:
+            self._bind_target(node.name.name, None, "an except clause")
+
+    def visit_ExceptStarHandler(self, node):
+        if node.name is not None:
+            self._bind_target(node.name.name, None, "an except clause")
+
+    def visit_ImportAlias(self, node):
+        if node.asname is not None:
+            target = node.asname.name
+        else:
+            target = node.name
+            while isinstance(target, cst.Attribute):
+                target = target.value
+        self._bind_target(target, None, "an import")
+
+    def visit_Del(self, node):
+        self._bind_target(node.target, None, "a del statement")
+
+    def visit_Global(self, node):
+        for item in node.names:
+            self._bind(item.name.value, "a global statement")
+
+    def visit_Nonlocal(self, node):
+        for item in node.names:
+            self._bind(item.name.value, "a nonlocal statement")
+
+    def visit_MatchAs(self, node):
+        if node.name is not None:
+            self._bind_target(node.name, None, "a match pattern")
+
+    def visit_MatchStar(self, node):
+        if node.name is not None:
+            self._bind_target(node.name, None, "a match pattern")
+
+    def visit_MatchMapping(self, node):
+        if node.rest is not None:
+            self._bind_target(node.rest, None, "a match pattern")
+
+
+def collect_param_rebinds(funcdef: cst.FunctionDef, params):
+    """What the body of ``funcdef`` binds to the names in ``params``.
+
+    Parameters
+    ----------
+    funcdef : libcst.FunctionDef
+        A formula method.
+    params : iterable of str
+        Its parameters, without ``self``.
+
+    Returns
+    -------
+    dict
+        Each parameter the body binds again, mapped to a list with one
+        item per binding: the value expression for a plain or augmented
+        assignment, or an assignment expression, in the formula's own
+        scope (``t += 1`` gives ``t + 1``), or else a phrase naming the
+        kind of binding (``"a for loop"``, ``"unpacking"``, ...), whose
+        value is not known.  A binding inside a comprehension is never
+        known; one inside a nested def, class or lambda does not bind
+        the parameter, unless it is declared ``nonlocal`` there.
+    """
+    visitor = _ParamRebinds(params)
+    funcdef.body.visit(visitor)
+    return visitor.rebinds
 
 
 # ---------------------------------------------------------------------------
@@ -680,11 +911,18 @@ def check_type_words(module_infos) -> None:
                           "cells")
                 if (has_cpdef or has_cdef) and cells.has_typeinfo():
                     for p in cells.params:
-                        # the public method and the _f_ formula declare
-                        # the parameter with the same type
-                        check(p, cells.get_argtype_expr(p, c_style=True),
-                              f"parameter of cells '{cells.name}'",
-                              param=True)
+                        # the public method and the _f_ formula can
+                        # differ: see CombinedCellsInfo.arg_type
+                        ctypes = set()
+                        if has_cpdef:
+                            ctypes.add(cells.get_argtype_expr(p, c_style=True))
+                        if has_cdef:
+                            ctypes.add(cells.get_argtype_expr(
+                                p, c_style=True, formula=True))
+                        for ctype in sorted(ctypes):
+                            check(p, ctype,
+                                  f"parameter of cells '{cells.name}'",
+                                  param=True)
             for ref in cls_info.refs.values():
                 if ref.name not in cls_info.spaces:
                     check(ref.name, ref.get_type_expr(c_style=True),

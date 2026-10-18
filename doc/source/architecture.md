@@ -37,7 +37,15 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    {py:class}`~modelx_cython.tracer.MxCallTracer`, a tracer derived from
    [MonkeyType](https://github.com/Instagram/MonkeyType) that records
    *values* rather than types
-   ({py:class}`~modelx_cython.monkeytype_tracing.CallTrace`).  When
+   ({py:class}`~modelx_cython.monkeytype_tracing.CallTrace`) of the
+   formula methods (`_f_*`), of the public methods of uncached cells
+   ({ref}`uncached-cells`) and of the spaces' `__call__`.  A trace that
+   changes nothing that the type summary below derives from the traces
+   kept so far — no new argument type, no larger integer argument, no
+   change to the merged return type and no new fallback to log — is
+   dropped as it arrives, so a function called many times keeps only a
+   few traces alive, and the summary, its log messages included, is the
+   one all the traces give.  When
    tracing finishes, {py:class}`~modelx_cython.tracer.MxCallTraceLogger`
    condenses the traces into per-cells type summaries
    ({py:class}`~modelx_cython.tracer.RuntimeCellsInfo`), reference-value
@@ -49,7 +57,8 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    [libcst](https://libcst.readthedocs.io/), and
    {py:class}`~modelx_cython.parser.ModuleVisitor` collects the lexical
    structure: space classes, their cells methods and parameters
-   (including which parameters have default values), their refs, and
+   (including their default values, and what each formula binds to
+   its parameters), their refs, and
    their child spaces.  All space modules are included even when the
    sample never exercised their cells, since other modules may
    reference their classes; an `_mx_model` module is included only
@@ -67,9 +76,12 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    call sites of cells whose sampled return value is a real-valued NumPy
    array.  A cells consumed only through element subscripting keeps a
    typed-memoryview return type; any other use makes it fall back to
-   `object` (see {ref}`memoryview-analysis`).  With every type now
-   final, the names that Cython would read as part of the C type
-   declared before them are rejected ({ref}`reserved-names`).
+   `object` (see {ref}`memoryview-analysis`).  With every return type
+   now final, the parameters that a formula binds to values not
+   provably of their C types fall back to `object`
+   ({ref}`parameter-fallbacks`), and with every type final, the names
+   that Cython would read as part of the C type declared before them
+   are rejected ({ref}`reserved-names`).
 
 6. **Copy** — only now that every check has passed, `Model_nomx` is
    copied to `Model_nomx_cy` (backing up any existing copy), and the
@@ -144,10 +156,50 @@ The runtime type summaries follow a few widening rules, implemented in
   under copy-on-write, be coerced.
 
 Most fallback decisions — conflicting argument or return types,
-usage-analysis fallbacks, spec sizes overridden by observed maxima, and
-cells demoted to plain Python methods — are logged at `INFO` level (run
-`mx2cy` with `--log-level INFO` to see them).
+usage-analysis fallbacks, parameter fallbacks, spec sizes overridden by
+observed maxima, and cells demoted to plain Python methods — are logged
+at `INFO` level (run `mx2cy` with `--log-level INFO` to see them).
 
+(parameter-fallbacks)=
+### Parameters typed `object` whatever was traced
+
+A parameter is declared with the C type of the values the sample passed,
+but Cython also compiles the formula's own uses of the name, and two of
+them can contradict that type.  `mx2cy` types such a parameter `object`,
+and logs it:
+
+* **A default value not of the type.**  `y=None` for a `double`
+  parameter fails with "Signature not compatible with previous
+  declaration", and `k=0.5` for a `long long` one with "Cannot assign
+  type 'double' to 'long long'".  Only a literal of the type is taken
+  to fit it ({py:func}`~modelx_cython.builder.default_fits`): an
+  integer literal for `long long`, an integer or float literal for
+  `double`, `True` or `False` for `bint`, a string literal or `None` for
+  `str`.  The parameter is then `object` in the public method and in the
+  formula.
+* **A value bound to it in the formula that is not provably of the
+  type.**  `rate = rate / 100` for a `long long` `rate` fails with
+  "Cannot assign type 'double' to 'long long'", and `t /= 2` compiles
+  and truncates the quotient.  Every binding of the name in the formula
+  is collected ({py:func}`~modelx_cython.parser.collect_param_rebinds`):
+  an assignment, an augmented assignment (`t += 1` binds `t + 1`) or an
+  assignment expression binds a value, and any other binding (a `for`
+  loop, unpacking, `del`, a `with` or `except` target, an import, a
+  comprehension, a `nonlocal` declaration in a nested function) binds an
+  unknown one.
+  {py:func}`~modelx_cython.powers.demote_rebound_params` keeps the type
+  only if every value is provably of it by the classifier of
+  {ref}`real-valued-powers`: an integer expression without `**` for
+  `long long` (`2 ** -t` is a double in Cython), and an integer or
+  floating expression for `double`; nothing for `bint` or `str`.  The
+  check is repeated until no parameter changes, since a parameter typed
+  `object` is unknown to the classifier.  For a cached cells, the
+  parameter is `object` in the `_f_` formula only: the public method,
+  which looks up the cache, keeps the C type, and the cache keeps its C
+  array.  For an uncached cells, whose public method is the formula, the
+  parameter is `object`.
+
+(real-valued-powers)=
 ## Real-valued `**`
 
 Cython gives `**` the semantics of Python's, so a `double` base raised
@@ -169,8 +221,11 @@ value while `(1 + rate(t)) ** (1 / 12)` does not have to.
 
 The proof is a conservative classifier over the formula's syntax tree.
 An operand is known to be floating or integral only when it is a
-numeric literal, a parameter or reference mx2cy has already typed, a
-call to a cells the resolver reaches, or arithmetic over those; true
+numeric literal, a parameter or reference mx2cy has already typed (a
+parameter keeps its C type in the formula only if every value the
+formula binds to it is provably of that type, see
+{ref}`parameter-fallbacks`), a call to a cells the resolver reaches, or
+arithmetic over those; true
 division counts as floating, which is what makes the `1 / 12` idiom
 work.  Everything else — local variables, subscripts, module
 attributes, and anything inside a construct that binds names of its own
@@ -236,6 +291,48 @@ cells fall back to a per-cells Python dict keyed by the argument tuple.
 Cells that modelx exports as *uncached* have no `_f_` formula method —
 their public method is the formula itself — and get no cache storage
 in the compiled model either.
+
+(uncached-cells)=
+### Uncached cells
+
+The tracer records an uncached cells through its public method:
+{py:class}`~modelx_cython.tracer.MxCodeFilter` admits a method of a space
+class with a user-defined name whose code does not call `self._f_<name>`,
+which is what the public method of a *cached* cells does (see
+{py:func}`~modelx_cython.tracer.is_uncached_cells_code`).  The public
+methods of cached cells are not traced: they run on every cache hit, and
+their `_f_` formulas carry the types.  The builder looks the uncached
+cells up under the public method's name
+({py:attr}`~modelx_cython.parser.LexicalCellsInfo.method_fqname`), so it
+gets argument and return types by the same rules as a cached one, and
+the method becomes a typed `cpdef` without a cache:
+
+```python
+@_mx_cy.ccall
+def scale(self, x: _mx_cy.double) -> _mx_cy.double:
+    return x * 2.0
+```
+
+A compiled caller then calls it through the vtable with C arguments, and
+the body runs on typed parameters.  Its integer arguments do not size
+any cache array.  The rules for cached cells apply unchanged: an
+uncached cells called with keyword arguments anywhere in the model, or
+whose body has a closure, stays a plain Python method; one the sample
+never called is `object` throughout; and a parameter whose default, or
+a value the formula binds to it, is not of its traced type is `object`
+({ref}`parameter-fallbacks`).  One rule differs: a real array returned
+by an uncached cells that no compiled caller uses is returned as the
+array (`object`), as before uncached cells were typed, not as the
+memoryview {py:data}`~modelx_cython.builder.MEMORYVIEW_FOR_EXTERNAL_ONLY_ARRAYS`
+gives a cached cells.
+
+Typing an uncached cells changes what a Python caller gets in the same
+ways as for a cached one: an `int` passed to a parameter traced with
+floats only arrives as a `float`, and an int/float return mixture
+returns `double`.  Conversely, a `float` passed to a parameter traced
+with integers only, or returned where only integers were traced, is
+converted to a C `long long`, which Cython 3.2 does by truncating it
+silently: the sample must cover the types the model is used with.
 
 ### Locked spaces
 

@@ -95,7 +95,7 @@ class _FakeCells:
     """Stands in for CombinedCellsInfo: only the parameter types and the
     fqname are read by :func:`rewrite_powers`."""
 
-    fqname = CLS + "._f_target"
+    fqname = formula_fqname = CLS + "._f_target"
     params = ("t", "x")
 
     def has_args(self):
@@ -104,10 +104,12 @@ class _FakeCells:
     def has_typeinfo(self):
         return True
 
-    def get_argtype_expr(self, arg, c_style=False):
+    def get_argtype_expr(self, arg, c_style=False, formula=False):
         # the C-style spelling is what kind_of_type_expr matches, so a
         # caller that forgot c_style=True must not silently pass
         assert c_style, "powers must ask for the C-style type expression"
+        # the formula's types, which can differ from the public method's
+        assert formula, "powers must ask for the formula's types"
         return "long long" if arg == "t" else "double"
 
 
@@ -268,3 +270,85 @@ def test_kind_maps_feed_the_classifier():
     )
     assert kind.kind(cst.parse_expression("self.rate(0)")) == KIND_FLOAT
     assert kind.kind(cst.parse_expression("self.rate_ref")) == KIND_FLOAT
+
+
+# --------------------------------------------------------------------
+# Parameters a formula binds again
+
+import types
+
+from modelx_cython.builder import CombinedCellsInfo
+from modelx_cython.parser import LexicalCellsInfo, collect_param_rebinds
+from modelx_cython.powers import demote_rebound_params
+from modelx_cython.tracer import ReturnTypeInfo
+
+
+def make_rebound(body, arg_types, has_formula_def=True):
+    """Module infos with one cells ``target(t, x)`` whose formula is
+    ``body``, traced with ``arg_types``"""
+    params = list(arg_types)
+    src = f"def _f_target(self, {', '.join(params)}):\n" + "".join(
+        "    " + line + "\n" for line in body.splitlines())
+    lx = LexicalCellsInfo("Model_nomx._mx_classes", "_c_Space1", "target",
+                          params)
+    rt = types.SimpleNamespace(ret_type=ReturnTypeInfo(float),
+                               arg_types=arg_types,
+                               max_args={p: 3 for p, t in arg_types.items()
+                                         if t is int})
+    cells = CombinedCellsInfo(None, lx, rt, {})
+    cells.has_formula_def = has_formula_def
+    cells.param_rebinds = collect_param_rebinds(cst.parse_statement(src),
+                                                params)
+    cls_info = types.SimpleNamespace(fqname=CLS, cells={"target": cells})
+    infos = {"Model_nomx._mx_classes": types.SimpleNamespace(
+        classes={"_c_Space1": cls_info})}
+    resolver = CellsResolver(cells_by_class={CLS: {"rate": RATE}},
+                             refs_by_class={CLS: {}},
+                             spaces_by_class={CLS: {}})
+    demote_rebound_params(infos, resolver, {RATE: KIND_FLOAT}, {CLS: {}})
+    return cells
+
+
+@pytest.mark.parametrize("body, arg_types, kept", [
+    # bound to values provably of the parameter's C type: kept
+    ("t = t - 1\nreturn t", {"t": int}, True),
+    ("t += 1\nt //= 2\nt = -t % 3\nreturn t", {"t": int}, True),
+    ("x = x / 100\nx = t\nx = self.rate() * 2\nreturn x",
+     {"t": int, "x": float}, True),
+    ("x **= 0.5\nreturn x", {"x": float}, True),
+    # not provably: object
+    ("t = t / 100\nreturn t", {"t": int}, False),
+    ("t /= 2\nreturn t", {"t": int}, False),         # compiles, truncates
+    ("t = 2 ** -t\nreturn t", {"t": int}, False),    # a double in Cython
+    ("t **= 2\nreturn t", {"t": int}, False),
+    ("t = max(t, 0.5)\nreturn t", {"t": int}, False),
+    ("t = self.rate()\nreturn t", {"t": int}, False),
+    ("x = None\nreturn x", {"x": float}, False),
+    ("for x in range(3):\n    pass\nreturn x", {"x": float}, False),
+    ("b = not b\nreturn b", {"b": bool}, False),
+    ("s = s + 'a'\nreturn s", {"s": str}, False),
+])
+def test_demote_rebound_params(body, arg_types, kept):
+    cells = make_rebound(body, arg_types)
+    param = list(cells.param_rebinds)[-1]
+    traced = cells.get_argtype_expr(param, c_style=True)
+    assert traced != "object"
+    expected = traced if kept else "object"
+    assert cells.get_argtype_expr(param, c_style=True, formula=True) \
+        == expected
+
+
+def test_demote_rebound_params_until_nothing_changes():
+    """x is demoted for t, which is demoted only once x is: the check is
+    repeated"""
+    cells = make_rebound("x = None\nt = x\nreturn t", {"t": float, "x": float})
+    assert cells.get_argtype_expr("x", c_style=True, formula=True) == "object"
+    assert cells.get_argtype_expr("t", c_style=True, formula=True) == "object"
+    # the public method of a cached cells keeps the types
+    assert cells.get_argtype_expr("t", c_style=True) == "double"
+
+
+def test_demote_rebound_params_uncached_cells_everywhere():
+    cells = make_rebound("t = t / 2\nreturn t", {"t": int},
+                         has_formula_def=False)
+    assert cells.get_argtype_expr("t", c_style=True) == "object"

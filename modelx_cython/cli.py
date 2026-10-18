@@ -50,7 +50,7 @@ from modelx_cython.parser import (
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
     analyze_usage, apply_verdicts, build_resolver)
-from modelx_cython.powers import build_kind_maps
+from modelx_cython.powers import build_kind_maps, demote_rebound_params
 
 _logger = logging.getLogger(__name__)
 
@@ -238,6 +238,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     fall back to ``object``, mark cells that are called with
     keyword arguments anywhere in the model so their public methods
     stay plain Python methods (C-level calls are positional-only),
+    type ``object`` the parameters a formula binds to values not
+    provably of their C types
+    (:func:`~modelx_cython.powers.demote_rebound_params`),
     then, with every type final, reject the names Cython would read as
     part of a C type (:func:`~modelx_cython.parser.check_type_words`);
     only then, with every check passed, rotate the backups of the
@@ -365,14 +368,17 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                     if cells.name in kwarg_names:
                         cells.called_with_kwargs = True
                         _logger.info(
-                            f"{cells.fqname} stays a Python method because "
+                            f"{cells.method_fqname} stays a Python method because "
                             "a call with keyword arguments matches its name")
 
         # Every cells return type is final by now, so the operands of a
-        # '**' can be typed: see modelx_cython.powers.
+        # '**' can be typed: see modelx_cython.powers.  So can the values
+        # a formula binds to its parameters: a parameter bound to a value
+        # not provably of its C type is typed object in the formula.
         module_infos = {u.module_info.fqname: u.module_info for u in units}
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
+        demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
 
         # Every type is final by now: reject the names that Cython would
         # read as part of the C type declared before them
