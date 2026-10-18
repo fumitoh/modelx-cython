@@ -26,11 +26,13 @@ anything the sample does not reach stays dynamically typed.
 Running `mx2cy Model_nomx` executes the following phases, orchestrated by
 {py:func}`modelx_cython.cli.main_handler`:
 
-1. **Copy** — `Model_nomx` is copied to `Model_nomx_cy` (backing up any
-   existing copy), and the static declaration file `_mx_sys.pxd` is placed
-   into the copy.
+1. **Check** — the spec is read, every model module is parsed (see
+   **Parse** below), and the names that cannot be compiled whatever
+   their types are rejected ({ref}`reserved-names`).  All of this
+   happens before anything is written and before the sample run, which
+   can take long.
 
-2. **Trace** — the sample script runs with
+2. **Trace** — the sample script runs on the exported model with
    {py:func}`sys.setprofile` set to
    {py:class}`~modelx_cython.tracer.MxCallTracer`, a tracer derived from
    [MonkeyType](https://github.com/Instagram/MonkeyType) that records
@@ -51,7 +53,7 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    slots, and space parameter types, and records the maximum observed
    value of every integer argument.
 
-3. **Parse** — every model module is parsed with
+3. **Parse** — in step 1, every model module is parsed with
    [libcst](https://libcst.readthedocs.io/), and
    {py:class}`~modelx_cython.parser.ModuleVisitor` collects the lexical
    structure: space classes, their cells methods and parameters
@@ -77,9 +79,16 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    `object` (see {ref}`memoryview-analysis`).  With every return type
    now final, the parameters that a formula binds to values not
    provably of their C types fall back to `object`
-   ({ref}`parameter-fallbacks`).
+   ({ref}`parameter-fallbacks`), and with every type final, the names
+   that Cython would read as part of the C type declared before them
+   are rejected ({ref}`reserved-names`).
 
-6. **Transform** — {py:class}`~modelx_cython.transformer.ModuleTransformer`
+6. **Copy** — only now that every check has passed, `Model_nomx` is
+   copied to `Model_nomx_cy` (backing up any existing copy), and the
+   static declaration file `_mx_sys.pxd` is placed into the copy.  A
+   failed check leaves the previous output as it was.
+
+7. **Transform** — {py:class}`~modelx_cython.transformer.ModuleTransformer`
    rewrites each module's CST in Cython's pure Python mode:
    `@cython.cclass` on space classes, `@cython.ccall`/`@cython.cfunc` on
    cells and formula methods, typed parameters and return annotations,
@@ -98,7 +107,7 @@ Running `mx2cy Model_nomx` executes the following phases, orchestrated by
    arguments anywhere in the model, since C-level calls are
    positional-only.
 
-7. **Compile** — {py:func}`modelx_cython.cli.create_setup` writes a
+8. **Compile** — {py:func}`modelx_cython.cli.create_setup` writes a
    `setup.py` that cythonizes all translated modules, and
    {py:func}`modelx_cython.cli.compile_main` runs it with
    `build_ext --inplace` in a subprocess.
@@ -230,6 +239,45 @@ still fails to compile rather than returning a wrong number.
 `_mx_pow` raises rather than returning the value C `pow` would in the
 two cases where it disagrees with Python: a negative base with a
 fractional exponent (`nan`) and `0.0` to a negative power (`inf`).
+
+(reserved-names)=
+## Names that cannot be compiled
+
+A model name reaches the `.pxd` declarations and the C code: a cells is
+a `cpdef` method and a member of the C vtable struct, a parameter is a
+parameter of the declarations, and a reference, space parameter or
+child space is a `cdef` attribute and a member of the C object struct.
+Some names break there, which without a check surfaces as a syntax error
+in the `.pxd` file or as C compiler errors, after the sample run.
+{py:mod}`modelx_cython.parser` rejects them up front, listing each with
+its space, kind and reason:
+
+* Cython's reserved words (`include`, `cimport`, `cdef`, `cpdef`,
+  `ctypedef`, `DEF`, `IF`, `ELIF`, `ELSE`), anywhere;
+* object-like C macros of the headers the compiled module includes
+  (`NULL`, `errno`, `stdin`, `EOF`, `INT_MAX`, `M_PI`, the error numbers
+  such as `ENOSPC`, MSVC's `DOMAIN` and `OVERFLOW`, Python's `PLATFORM`,
+  `LONG_BIT`, `T_INT`, `READONLY` and `Py_True`, ...), as cells,
+  references, space parameters and child spaces;
+* function-like C macros (`isnan`, `offsetof`, Cython's own `likely`
+  and `unlikely`, and with MSVC `min` and `max`), as cells that compiled
+  code calls;
+* C type words after a C type, checked once the types are final: a
+  `long long` cells, parameter or reference named `long`, `short`,
+  `double`, `float`, `int`, `void`, ... (Cython reads
+  `cdef public long long double` as a type), one named `complex` after
+  `double`, `long long` or `bint`, and a cells named `str` returning
+  `str`.
+
+The lists were measured by compiling every candidate name in every
+position and with every C type `mx2cy` declares, with Cython 3.2 and
+MSVC 14.37, and some of the macros were added from the headers; the
+macro list is not exhaustive, and a macro it misses still fails at C
+compile time.  Local variables are not
+affected.  `mx2cy` fails instead of renaming the names because they are
+the model's interface: code using the compiled model calls its cells and
+reads its references by name, and passes arguments by keyword, so a
+rename would silently change what that code has to call.
 
 ## Cells caching in the compiled model
 

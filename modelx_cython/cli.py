@@ -45,7 +45,8 @@ from modelx_cython.consts import MX_MODEL_MOD, MX_SPACE_MOD, MX_SYS_MOD
 from modelx_cython.config import TransSpec
 from modelx_cython.tracer import trace_calls, MxCallTraceLogger, MxCodeFilter
 from modelx_cython.builder import ModuleInfo
-from modelx_cython.parser import ModuleVisitor
+from modelx_cython.parser import (
+    ModuleVisitor, check_reserved_names, check_type_words)
 from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
     analyze_usage, apply_verdicts, build_resolver)
@@ -214,27 +215,38 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     location (``args.setup`` if given, otherwise ``setup.py`` in the
     same parent directory).
 
-    Unless ``args.compile_only`` is set, performs the translation:
-    rotates backups of the output directory, copies the model there,
-    copies the bundled ``_mx_sys.pxd`` into it, runs the sample script
-    under tracing via :func:`run_sample`, and reads the spec file with
+    Unless ``args.compile_only`` is set, performs the translation.
+    First, before anything is written: reads the spec file with
     :func:`ast.literal_eval` (skipped when ``args.no_spec`` is set; a
     missing spec file re-raises :class:`FileNotFoundError` with a hint
-    to use ``--no-spec``).  Translation proper then runs in three
-    phases: (1) parse every model/space module and build its
-    :class:`~modelx_cython.builder.ModuleInfo` -- all space modules
+    to use ``--no-spec``); parses every model/space module of the model
+    with :class:`~modelx_cython.parser.ModuleVisitor`; and rejects the
+    names that cannot be compiled with
+    :func:`~modelx_cython.parser.check_reserved_names`.  Then runs the
+    sample script on the original model under tracing via
+    :func:`run_sample`.  Translation proper then runs
+    in three phases: (1) build the
+    :class:`~modelx_cython.builder.ModuleInfo` of every parsed module
+    -- all space modules
     are included even when the sample never exercised their cells
     (other modules may reference their classes in ``.pxd``
     declarations), while an ``_mx_model`` module is included only
     when traced, since the transformer does not handle the model
-    class; (2) statically analyze how array-returning cells are
+    class -- which also validates the per-cells spec entries; (2)
+    statically analyze how array-returning cells are
     consumed and apply the verdicts so unsafe memoryview return types
     fall back to ``object``, mark cells that are called with
     keyword arguments anywhere in the model so their public methods
     stay plain Python methods (C-level calls are positional-only),
-    and type ``object`` the parameters a formula binds to values not
+    type ``object`` the parameters a formula binds to values not
     provably of their C types
-    (:func:`~modelx_cython.powers.demote_rebound_params`);
+    (:func:`~modelx_cython.powers.demote_rebound_params`),
+    then, with every type final, reject the names Cython would read as
+    part of a C type (:func:`~modelx_cython.parser.check_type_words`);
+    only then, with every check passed, rotate the backups of the
+    output directory, copy the model there and copy the bundled
+    ``_mx_sys.pxd`` into it, so that a failed check leaves the
+    previous output in place;
     (3) rewrite each included module with
     :class:`~modelx_cython.transformer.ModuleTransformer`, write its
     ``.pxd`` and ``__init__.pxd`` files, and finally write the
@@ -266,6 +278,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     FileNotFoundError
         If translation is performed (``--compile-only`` not set), the
         spec file does not exist, and ``--no-spec`` was not given.
+    ValueError
+        If the spec is invalid, or, as
+        :class:`~modelx_cython.parser.ReservedNameError`, if a name in
+        the model cannot be compiled.
     """
 
     orig_path = pathlib.Path(args.model_path).resolve()
@@ -275,11 +291,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
     setup_file = pathlib.Path(args.setup) if args.setup else work_dir / "setup.py"
 
     if not args.compile_only:
-        increment_backups(model_path)
-        shutil.copytree(orig_path, model_path)
-        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
-
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        # The spec and the names in the model are checked before the
+        # sample run, which can take long, so that a mistake in either
+        # fails at once.
         if args.no_spec:
             d = {}
         else:
@@ -289,17 +303,30 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
+
+        # Phase 0: parse all sources, and reject the names that cannot
+        # be declared in a .pxd file or compiled to C.  The sources are
+        # read from the model, before it is copied, under the module
+        # names of the copy.
+        visitors = {}
+        for m, src_path in iter_module_files(orig_path):
+            m = ".".join([model_name] + m.split(".")[1:])
+            source = src_path.read_text(encoding="utf-8")
+            visitors[m] = (source, ModuleVisitor(module=m, source=source))
+        check_reserved_names(v for _, v in visitors.values())
+
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
         rel_model_path = model_path.relative_to(model_path.parent)
 
         modules = [rel_model_path / (MX_SYS_MOD + ".py")]
 
-        # Phase 1: parse all sources and build all module infos.
+        # Phase 1: build all module infos.
         # Every model/space module is translated, including those whose
         # cells the sample never exercised (e.g. enum-only spaces):
         # other modules may reference their classes in pxd declarations,
         # so their pxd files must exist.
         units = []
-        for m, src_path in iter_module_files(model_path):
+        for m, (source, visitor) in visitors.items():
             subs = m.split(".")
             assert subs.pop(0) == model_path.name
             assert subs[-1] in [MX_MODEL_MOD, MX_SPACE_MOD]
@@ -315,8 +342,6 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             rel_src_path = rel_model_path / "/".join(subs)
             abs_pxd_path = model_path / "/".join(pxd_path)
             abs_init_path = model_path / "/".join(subs[:-1] + ["__init__.pxd"])
-            source = abs_src_path.read_text(encoding="utf-8")
-            visitor = ModuleVisitor(module=m, source=source)
             module_info = ModuleInfo(m, visitor, logger, spec)
             for cls in sorted(visitor.locked_classes):
                 if cls in module_info.classes:
@@ -354,6 +379,19 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         resolver = build_resolver(module_infos)
         cells_kinds, ref_kinds = build_kind_maps(module_infos)
         demote_rebound_params(module_infos, resolver, cells_kinds, ref_kinds)
+
+        # Every type is final by now: reject the names that Cython would
+        # read as part of the C type declared before them
+        check_type_words(u.module_info for u in units)
+
+        # Every check has passed: only now is the previous output rotated
+        # and the model copied, so that an error above leaves the
+        # previous output in place.  The sample run above imported the
+        # original model, so its __pycache__ directories are not copied.
+        increment_backups(model_path)
+        shutil.copytree(orig_path, model_path,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy(pathlib.Path(__file__).parent / (MX_SYS_MOD + ".pxd"), model_path)
 
         # Phase 3: transform and write out
         for u in units:
