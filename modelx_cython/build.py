@@ -12,7 +12,7 @@ from typing import Sequence
 import libcst as cst
 from libcst.metadata import MetadataWrapper, PositionProvider
 
-from .consts import FORMULA_PREF, MODULE_PREF, SPACE_PREF
+from .consts import FORMULA_PREF, MODULE_PREF, MX_SPACE_MOD, SPACE_PREF
 from .scopes import lexical_nodes
 from .syntax import statements, walk
 
@@ -112,7 +112,8 @@ FP_CONTRACT_OFF = '-ffp-contract=off'
 def fp_contract_off(cmdclass, providers=()):
     """Return ``cmdclass`` with a ``build_ext`` that compiles model modules with
     :data:`FP_CONTRACT_OFF` on GCC-style compilers. Provider modules keep their own
-    options (and their build-cache identity)."""
+    options (and their build-cache identity). MSVC release builds of generated
+    Space classes allow more aggressive inlining of native Cell helpers."""
     from setuptools.command.build_ext import build_ext
 
     providers = frozenset(providers)
@@ -123,6 +124,13 @@ def fp_contract_off(cmdclass, providers=()):
             if (extension.name not in providers and FP_CONTRACT_OFF not in args
                     and self.compiler.compiler_type in ('unix', 'mingw32', 'cygwin')):
                 extension.extra_compile_args = [*args, FP_CONTRACT_OFF]
+            elif (self.compiler.compiler_type == 'msvc' and not self.debug
+                  and extension.name.rsplit('.', 1)[-1] == MX_SPACE_MOD):
+                # Generated Cells call small cache and vector helpers in their inner loops.
+                # Keep their inlining independent of the default /O2 budget where possible.
+                options = [*args, *os.environ.get('CL', '').split(), *os.environ.get('_CL_', '').split()]
+                if not any(arg.startswith(('/Ob', '-Ob')) or arg in ('/Od', '-Od') for arg in options):
+                    extension.extra_compile_args = [*args, '/Ob3']
             return super().build_extension(extension)
 
     return {**cmdclass, 'build_ext': ModelFloatingPoint}
