@@ -188,6 +188,19 @@ cdef inline object _mx_generic_getattr(object receiver, object name):
     return PyObject_GenericGetAttr(receiver, name)
 
 
+cdef inline int _mx_check_enum_schema(object receiver, object owner, tuple bindings) except -1:
+    """Declared model-code bindings are fixed until the model is rebuilt."""
+    cdef object actual = <object>Py_TYPE(receiver)
+    cdef object base, name
+    if actual is owner:
+        return 0
+    for base in actual.__mro__:
+        if base is owner:
+            break
+        for name in bindings:
+            if name in base.__dict__:
+                raise TypeError(f"enum definition {name!r} is fixed in this compiled model; rebuild the model to change it")
+    return 0
 
 
 cdef inline double _mx_pow(double b, double e) except? -1.0:

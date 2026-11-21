@@ -104,7 +104,8 @@ def increment_backups(
             backup_path.rename(next_backup)
 
 
-def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None) -> MxCallTraceLogger:
+def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str = None,
+               *, record_reads: bool = False) -> MxCallTraceLogger:
     """Run the user's sample script while tracing calls into the model.
 
     Temporarily prepends the model's parent directory to ``sys.path``,
@@ -142,7 +143,15 @@ def run_sample(model_path: pathlib.Path, sample_path: str, new_model_name: str =
             logger=logger,
             max_typed_dict_size=0,
             code_filter= MxCodeFilter()):
-            runpy.run_path(sample_path, run_name="__main__")
+            if record_reads:
+                from . import read_notes
+                with read_notes.recording(module):      # what arrives at each table read (decisions from tracing)
+                    runpy.run_path(sample_path, run_name="__main__")
+                logger.read_notes = dict(read_notes.NOTES)
+                logger.read_notes_json = read_notes.as_json()
+                logger.read_notes_by_text = read_notes.by_text()
+            else:
+                runpy.run_path(sample_path, run_name="__main__")
 
     finally:
         assert sys.path.pop(0) == module_path
@@ -294,7 +303,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 raise FileNotFoundError(f"{e}. Add '--no-spec' to omit the spec file.") from e
 
         spec = TransSpec(d)
-        logger = run_sample(orig_path, args.sample, new_model_name=model_name)
+        logger = run_sample(orig_path, args.sample, new_model_name=model_name,
+                            record_reads=spec.policy.prepared_tables)
         # integer guards (owner's rule): the mode follows the largest traced integer
         from .config import UNCHECKED_LIMIT, UNCHECKED_LIMIT_NOTE, resolve_integer_checks
         mode = resolve_integer_checks(spec.policy, logger.max_integer)
@@ -414,6 +424,9 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
                 cells_by_name, infer_types=False,
             )
+            # api-tables (D101a, D103): the last pass, after every pass that looks cells up by name
+            from modelx_cython import table_cells
+            state = state.replace(table_cells.finish(state.syntax, u.module_info))
             translated_modules[u.fqname] = state
             # the printed text must mean the tree the passes built (no dropped parentheses)
             from modelx_cython import reparse_check

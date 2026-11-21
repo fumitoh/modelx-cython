@@ -69,6 +69,9 @@ from modelx_cython.powers import rewrite_powers
 from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
 from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
 from modelx_cython import numeric_cache
+from modelx_cython import enums as code_enums
+from modelx_cython import table_cells
+from modelx_cython import holds
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -210,6 +213,9 @@ class PXDGenerator:
                         if c.native_provider_binding is not None)
         for provider in sorted(contexts):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
+        enum_declarations = code_enums.declarations(self.module)
+        if enum_declarations:
+            stmts.append(enum_declarations)
         return "\n".join(stmts)
 
     @cached_property
@@ -306,6 +312,15 @@ class PXDGenerator:
             decl_stmts.append("cdef dict _mx_collect_cache\n")
         if cls_name in self.module.visitor.dynamic_ref_classes:
             decl_stmts.append("cdef dict __dict__\n")
+        for name in getattr(cls_info, 'readonly_refs', ()):
+            decl_stmts.append(f'cdef object {code_enums.storage(name)}\n')
+        from modelx_cython.helpers import module_name
+        for name, provider in getattr(cls_info, 'native_contexts', {}).items():
+            decl_stmts.append(f'cdef {module_name(provider)}.LookupContext {name}\n')
+        # R-4: what an item holds from shared inputs (holds.HoldTable)
+        decl_stmts.extend(holds.pxd_declarations(cls_info))
+        if getattr(self.module.spec.policy, 'prepared_tables', False):
+            decl_stmts.extend(table_cells.pxd_declarations(cls_info))     # T-4.2
         for cells in cls_info.cells.values():
 
             assert cells.module == self.module.fqname
@@ -365,16 +380,24 @@ class PXDGenerator:
             Concatenated declaration lines.
         """
 
+        cls_info = self.module.classes[cls_name]
+        renamed = table_cells.module_renames(self.module)[cls_name]
         decl_stmts = []
-        for ref in self.module.classes[cls_name].refs.values():
+        for ref in cls_info.refs.values():
 
             assert ref.module == self.module.fqname and ref.cls == cls_name
 
-            if ref.name in self.module.classes[cls_name].spaces:
+            if ref.name in cls_info.spaces:
                 # declared below as a child space
                 continue
+            if ref.name in getattr(cls_info, 'readonly_refs', ()):
+                continue
 
-            stmt = f"cdef public {ref.get_type_expr(c_style=True)} {ref.name}\n"
+            visibility = "public "      # as upstream: every Reference is a plain attribute
+            name = renamed.get(ref.name, ref.name)
+            if name != ref.name:
+                visibility = ""     # api-tables (D101a): stored renamed; a property serves Python
+            stmt = f"cdef {visibility}{ref.get_type_expr(c_style=True)} {name}\n"
             decl_stmts.append(stmt)
 
         # Declare child spaces
@@ -502,8 +525,10 @@ class PXDGenerator:
                 parameters = self._add_param_type_hints(
                     cls_name=cls_name, cells_name=cells.name
                 )
+                # api-tables (D101a): a table cell's C entry is renamed; a property serves Python
+                entry = table_cells.module_renames(self.module)[cls_name].get(cells.name, cells.name)
                 decl_stmts.append(
-                    f"cpdef {rettype} {cells.name}({parameters})\n"
+                    f"cpdef {rettype} {entry}({parameters})\n"
                 )
             else:
                 parameters = self._add_param_type_hints(
@@ -584,6 +609,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.function_origins = {}      # D139: {private entry of an uncached Cell: (class, Cell)}
         self.entry_domains = {}         # D139b: {private entry of an uncached Cell: its argument domain}
         self.helper_providers.update(numeric_cache.providers(module))
+        code_enums.prepare(module)
 
     def _compact_spill(self, cells, cls_name, source):
         index = len(self._cold_spills)
@@ -605,11 +631,20 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
+        from modelx_cython import held_arrays
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
+        # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
+        node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
+        node = self._table_reads_with_row_fields(node, cls_info, cells, 'int' in builtin_keys)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
+        self._table_reads_report(cells)
+        enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
+        node = node.visit(enum_comparisons)
+        cells.native_enum_comparisons = enum_comparisons.comparisons
+        cells.native_enum_constants = enum_comparisons.count
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
@@ -619,6 +654,222 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
+    def _table_reads(self, node, cls_info, cells, builtin_int):
+        """Lower and report table reads before the remaining formula transforms."""
+        return self._table_reads_lowered(node, cls_info, cells, builtin_int)
+
+    def _row_cells(self, cls_info):
+        """diag-run8 F3: the row cells of the class whose every use is a field read
+        (``row_cells.analyse``), computed once per class; {} without typed table reads."""
+        cache = self.__dict__.setdefault('_row_cells_cache', {})
+        if cls_info.name not in cache:
+            accepted, refused = {}, {}
+            if self._resolver is not None and getattr(self.module.spec.policy, 'typed_table_reads', False):
+                from modelx_cython import row_cells
+                accepted, refused = row_cells.analyse(self._module_node, cls_info.name)
+                for name in list(accepted):
+                    cell = cls_info.cells.get(name)
+                    if cell is None or cell.has_args() or not cell.has_formula_def:
+                        refused[name] = 'not a cached zero-argument Cell'
+                        del accepted[name]
+                    elif not all(row_cells.item_constant(part, self._cached_call)
+                                 for part in row_cells.key_parts(accepted[name])):
+                        # A reader can hold the prepared row only when every key part is fixed per item.
+                        refused[name] = 'a key part is not fixed per item'
+                        del accepted[name]
+            for name, why in refused.items():
+                if name in cls_info.cells:
+                    cls_info.cells[name].row_cell_kept = why
+            for name in accepted:
+                cls_info.cells[name].row_cell_inlined = True
+            cache[cls_info.name] = accepted
+        return cache[cls_info.name]
+
+    def _prefix_cells(self, cls_info):
+        """T-4: {cell: its ``T.loc[key]``} for the zero-argument cells of the class whose formula is ``return
+        T.loc[key]`` and that no other class of the module defines (frame_reads decides prefix from row)."""
+        cache = self.__dict__.setdefault('_prefix_cache', {})
+        if cls_info.name not in cache:
+            from modelx_cython import row_cells
+            found = {}
+            module = getattr(self, '_module_node', None)
+            classes = [n for n in getattr(module, 'body', ()) if isinstance(n, cst.ClassDef)]
+            own = next((c for c in classes if c.name.value == cls_info.name), None)
+            if own is not None:
+                for func in own.body.body:
+                    if isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_'):
+                        expr = row_cells._row_expression(func)
+                        name = func.name.value[3:]
+                        if expr is not None and not any(
+                                isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
+                                for c in classes if c is not own for f in c.body.body):
+                            found[name] = expr
+            cache[cls_info.name] = found
+        return cache[cls_info.name]
+
+    def _param_prefix_cells(self, cls_info):
+        """T-5c (shape G): {cell: (parameter names, its ``T.loc[key]``)} for the cells of the class with positional
+        parameters whose formula is ``return T.loc[key]``, the key's names among the parameters, T a self-rooted
+        zero-argument call, and that no other class of the module defines."""
+        cache = self.__dict__.setdefault('_param_prefix_cache', {})
+        if cls_info.name not in cache:
+            from modelx_cython import row_cells
+            found = {}
+            module = getattr(self, '_module_node', None)
+            classes = [n for n in getattr(module, 'body', ()) if isinstance(n, cst.ClassDef)]
+            own = next((c for c in classes if c.name.value == cls_info.name), None)
+            for func in (own.body.body if own is not None else ()):
+                if not (isinstance(func, cst.FunctionDef) and func.name.value.startswith('_f_')):
+                    continue
+                params = func.params
+                names = [p.name.value for p in params.params]
+                if (len(names) < 2 or names[0] != 'self' or params.star_arg not in (None, cst.MaybeSentinel.DEFAULT)
+                        or params.kwonly_params or params.star_kwarg or params.posonly_params
+                        or any(p.default is not None for p in params.params)):
+                    continue
+                body = row_cells._body(func)
+                ret = body[0].body[0] if (len(body) == 1 and isinstance(body[0], cst.SimpleStatementLine)
+                                          and len(body[0].body) == 1) else None
+                expr = ret.value if isinstance(ret, cst.Return) else None
+                if not (isinstance(expr, cst.Subscript) and len(expr.slice) == 1
+                        and isinstance(expr.slice[0].slice, cst.Index) and expr.slice[0].slice.star is None
+                        and isinstance(expr.value, cst.Attribute) and expr.value.attr.value == 'loc'
+                        and row_cells._self_chain_call(expr.value.value)):
+                    continue
+                free = row_cells._Names()
+                expr.slice[0].slice.value.visit(free)
+                name = func.name.value[3:]
+                if (free.plain and free.names <= set(names) and not any(
+                        isinstance(f, cst.FunctionDef) and f.name.value in ('_f_' + name, name)
+                        for c in classes if c is not own for f in c.body.body)):
+                    found[name] = (names[1:], expr.with_changes(lpar=(), rpar=()))
+            cache[cls_info.name] = found
+        return cache[cls_info.name]
+
+    def _cached_call(self, call):
+        """A self-rooted zero-argument call of a cached Cell (the resolver's cached_cells)."""
+        name = call.func.attr.value if isinstance(call.func, cst.Attribute) else None
+        cached = getattr(self._resolver, 'cached_cells', ())
+        return name is not None and any(str(c).endswith('._f_' + name) for c in cached)
+
+    def _table_reads_with_row_fields(self, node, cls_info, cells, builtin_int):
+        """diag-run8 F3: a formula reading fields of accepted row cells is lowered with each
+        ``self.R()`` replaced by the cell's row expression; when a replaced read is not lowered to a
+        native row read, the formula is lowered as written instead (its reads keep the Record)."""
+        rows = {name: expr for name, expr in self._row_cells(cls_info).items() if name != cells.name}
+        cells.row_fields_inlined = 0
+        if rows:
+            from modelx_cython import row_cells
+            inline = row_cells.Inline(rows)
+            candidate = node.visit(inline)
+            if inline.count:
+                code_of = cst.Module(body=[]).code_for_node
+                self._row_names = {code_of(expr): name for name, expr in rows.items()}
+                try:
+                    lowered = self._table_reads(candidate, cls_info, cells, builtin_int)
+                finally:
+                    self._row_names = None
+                # Every inlined field read must be an L2 read of a row held per item.
+                if sum(1 for e in getattr(cells, 'frame_reads', ()) if e['form'] == 'L2') >= inline.count:
+                    cells.row_fields_inlined = inline.count
+                    return lowered
+        return self._table_reads(node, cls_info, cells, builtin_int)
+
+    def _lower_frames(self, frames, node, cls_info, cells):
+        """T-5c: ``frames.lower(node)``; an internal error leaves the formula as written (every read on pandas): the
+        class's held fields and the read signatures are restored as they were before it, so nothing of the failed
+        lowering is emitted, and the build report records the error. ``strict_lowering`` raises it instead."""
+        import copy
+        holds = copy.deepcopy(getattr(cls_info, 'holds', None))
+        signatures = dict(getattr(self._resolver, 'table_signatures', {}))
+        try:
+            return frames.lower(node)
+        except Exception as error:
+            if getattr(self.module.spec.policy, 'strict_lowering', False):
+                raise
+            cls_info.holds = holds
+            if hasattr(self._resolver, 'table_signatures'):
+                self._resolver.table_signatures.clear()
+                self._resolver.table_signatures.update(signatures)
+            frames.lowered = []
+            frames.lowered_nodes.clear()
+            frames.lowered_text.clear()
+            frames.param_readers.clear()
+            frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
+                                'reason': f'declined after internal error: {type(error).__name__}: {error}'}]
+            import logging
+            logging.getLogger(__name__).warning('table reads of %s left to pandas after an internal error: %s: %s',
+                                                cells.name, type(error).__name__, error)
+            return node
+
+    def _table_reads_lowered(self, node, cls_info, cells, builtin_int):
+        cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
+        if self._resolver is None:
+            return node
+        if getattr(self.module.spec.policy, 'prepared_tables', False):
+            # T-3: reads of a traced pandas frame onto its PreparedTable (frame_reads.py)
+            from modelx_cython.frame_reads import FrameReads
+            frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
+                                getattr(self, '_row_names', None), self._prefix_cells(cls_info),
+                                self._param_prefix_cells(cls_info), builtin_int=builtin_int)
+            node = self._lower_frames(frames, node, cls_info, cells)
+            cells.frame_reads = frames.lowered + frames.declined
+            # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
+            from modelx_cython.frame_reads import without_fallbacks
+            native = without_fallbacks(node)
+            cells.read_audit = frames.audit(native)
+            cells.read_param_readers = frames.param_readers
+            cells.read_unsampled_lowered = frames.unsampled_lowered
+            pandas = self._pandas_reads(native, cls_info, cells)
+        else:
+            pandas = self._pandas_reads(node, cls_info, cells)
+        if not (self._resolver.table_results or cls_info.refs):
+            cells.table_reads_untyped = pandas      # nothing to lower: the generated code is unchanged
+            return node
+        from modelx_cython.admission import table_read_sites
+        sites = table_read_sites(node, self._resolver, cls_info)
+        if not sites:
+            cells.table_reads_untyped = pandas
+            return node
+        per_step = cells.has_args()
+        cells.table_reads_untyped = sorted(
+            [site.entry(per_step, HELPER_TABLE_READ) for site in sites] + pandas,
+            key=lambda entry: entry['line'])
+        return node
+
+    def _pandas_reads(self, node, cls_info, cells):
+        """Report entries for reads through pandas objects (never lowered): a zero-argument
+        Cell that returns a pandas DataFrame or Series, a Reference holding one, or a local
+        assigned from either. Without them a formula that runs pandas on every step reads as
+        clean in the report."""
+        if self._resolver is None or not (getattr(self._resolver, 'pandas_results', None) or cls_info.refs):
+            return []
+        from modelx_cython.admission import PANDAS_RECEIVER, table_read_sites
+        return [site.entry(cells.has_args(), PANDAS_RECEIVER)
+                for site in table_read_sites(node, self._resolver, cls_info, pandas=True)]
+
+    def _table_reads_kept(self, node, cls_info, cells, why):
+        """List the table reads of a formula kept as a Python method (no lowering)."""
+        cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
+        if self._resolver is None or not (self._resolver.table_results or cls_info.refs
+                                          or getattr(self._resolver, 'pandas_results', None)):
+            return node
+        from modelx_cython.admission import KEPT_PYTHON, table_read_sites
+        cells.table_reads_untyped = sorted(
+            [site.entry(cells.has_args(), KEPT_PYTHON.format(why=why))
+             for site in table_read_sites(node, self._resolver, cls_info)]
+            + self._pandas_reads(node, cls_info, cells), key=lambda entry: entry['line'])
+        self._table_reads_report(cells)
+        return node
+
+    @staticmethod
+    def _table_reads_report(cells):
+        """Warn once per per-step untyped table read."""
+        from modelx_cython.admission import untyped_read_warning
+        for entry in cells.table_reads_untyped:
+            if entry['per_step']:
+                _logger.warning(untyped_read_warning(cells.fqname, entry))
+
     def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
         """Bind declared provider symbols in either C functions or compiled defs.
 
@@ -648,6 +899,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         """
         self._cold_sums = []
         self._cold_spills = []
+        self._held_arrays = {}
         self._dense_layouts = {}
         self._next_cold_sum = 0
         self._uses_native_round = False
@@ -681,6 +933,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 cst.parse_statement(
                     f"import cython as {CY_MOD}", config=updated_node.config_for_parsing
                 ),
+                cst.parse_statement(table_cells.IMPORT, config=updated_node.config_for_parsing),
                 *updated_node.body,
             )
         )
@@ -692,8 +945,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             (module, self.dense_entries, self.formula_entries, self.function_origins,
              self.entry_domains) = add_inline_entries(
                 module, ordinary, self._dense_layouts)
-        if self._cold_sums or self._cold_spills:
-            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
+        if self._cold_sums or self._cold_spills or self._held_arrays:
+            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills,
+                                               *(stmt for held in self._held_arrays.values() for stmt in held.body)))
         directives = []
         # integer guards: overflow checks only in the checked mode (owner's rule), with or without type
         # inference: a formula's typed C integer arithmetic (Cell results, typed parameters) is C
@@ -704,6 +958,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if directives:
             module = module.with_changes(header=(
                 cst.EmptyLine(comment=cst.Comment('# cython: ' + ', '.join(directives))), *module.header))
+        # api-tables (D101a): rename the C members of table cells and table References
         return module.visit(NumericExceptions())
 
     def leave_ClassDef(
@@ -791,7 +1046,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     continue
 
                 stmt = cst.parse_statement(
-                    f"{ref.name}: {ref.get_type_expr()}",
+                    f"{code_enums.storage(ref.name) if ref.name in getattr(self.module.classes[cls_name], 'readonly_refs', ()) else ref.name}: {ref.get_type_expr()}",
                     config=self._module_node.config_for_parsing,
                 )
                 if is_first:
@@ -822,6 +1077,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 decl_stmts.append(stmt)
 
             from modelx_cython.helpers import module_name
+            decl_stmts.extend(cst.parse_statement(line)
+                              for line in holds.py_declarations(self.module.classes[cls_name]))
+            updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
+                body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -1054,6 +1313,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.formula_is_generator:
                     # yield is not supported inside cdef functions;
                     # leave as a plain Python method
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'generator')
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 scope = self.get_metadata(ScopeProvider, original_node.body)
@@ -1065,6 +1325,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     # initialized in the closure. A compiled def binds them
                     # through its normal Python argument handling.
                     cells.formula_has_captured_default = True
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'captured default')
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
                 updated_node = self._rewrite_powers(
                     updated_node, cls_info, cells, scope)
@@ -1140,6 +1401,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 if cells.body_has_closure:
                     # closures cannot be compiled inside cpdef functions;
                     # leave as a plain Python method
+                    updated_node = self._table_reads_kept(updated_node, cls_info, cells, 'closure')
                     return self._bind_declared_helpers(updated_node, cls_info, cells)
 
                 if not cells.has_formula_def:
@@ -1333,10 +1595,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                     f'    {flag} = True\n'
                                     f'    return {cache}\n')
                         stmts = cst.parse_module(
-                            self._locked_body(
-                                f"{MX_SELF}.{HAS_PREF}{meth_name}",
-                                f"{MX_SELF}.{VAR_PREF}{meth_name}",
-                                f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"),
+                            body,
                             config=self._module_node.config_for_parsing
                         ).body
                         return updated_node.with_changes(

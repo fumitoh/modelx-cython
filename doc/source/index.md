@@ -32,7 +32,9 @@ installation
 tutorial
 cli
 spec
+native_providers
 freethreading
+table_reads
 implementation
 releases
 ```
