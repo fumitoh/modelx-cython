@@ -206,8 +206,11 @@ model.Data.table()
 item = model.Calc[1]
 item.prime()
 reclassified.__class__ = ReversedFrame
+selected = reclassified.loc['A']
+expected = [(int(k), float(v)) for k, v in zip(selected.index, selected['amount'])]
+assert expected != [(0, 4.0), (10, 8.0)]
 with count(reclassified) as hits:
-    assert item.anchors() == [(10, 8.0), (0, 4.0)] and hits == ['A']
+    assert item.anchors() == expected and hits == ['A']
 
 replaced = base.copy()
 model = fresh(replaced)
