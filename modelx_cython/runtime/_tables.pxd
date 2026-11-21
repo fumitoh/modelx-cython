@@ -19,7 +19,7 @@ cdef enum:
 cdef class PreparedTable:
     cdef object _source                    # weak reference to the user's frame or Series (``source``): a prepared
                                            # copy never keeps a replaced frame alive
-    cdef object _zip_axes                   # exact index and columns admitted at publication
+    cdef object _zip_axes                   # exact index and columns seen before bound preparation
     cdef readonly bint is_series
     cdef readonly Py_ssize_t nrows, nlevels
     cdef readonly tuple level_labels       # per level: its labels in code order (a list)

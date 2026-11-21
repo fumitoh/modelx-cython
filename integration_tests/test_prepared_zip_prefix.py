@@ -147,6 +147,25 @@ metadata.attrs['tag'] = 'current metadata'
 with count(metadata) as hits:
     assert item.anchors() == [(0, 4.0), (10, 8.0)] and hits == ['A']
 
+changed_at_bind = base.copy()
+
+
+class ReplaceAxesDuringCopy:
+    def __deepcopy__(self, memo):
+        changed_at_bind.index = pd.MultiIndex.from_tuples([('B', 20), ('B', 30), ('A', 40), ('A', 50)])
+        changed_at_bind.attrs = {}
+        return self
+
+
+changed_at_bind.attrs['callback'] = ReplaceAxesDuringCopy()
+model = fresh(changed_at_bind)
+model.Data.table()
+assert not changed_at_bind.attrs
+item = model.Calc[1]
+item.prime()
+with count(changed_at_bind) as hits:
+    assert item.anchors() == [(40, 4.0), (50, 8.0)] and hits == ['A']
+
 shadowed = base.copy()
 model = fresh(shadowed)
 model.Data.table()
@@ -155,6 +174,39 @@ item.prime()
 xs = shadowed.xs
 shadowed.xs = lambda key, axis=0: xs(key, axis=axis).iloc[::-1]
 with count(shadowed) as hits:
+    assert item.anchors() == [(10, 8.0), (0, 4.0)] and hits == ['A']
+
+redirected = base.copy()
+redirected.index = base.index.copy(deep=True)
+model = fresh(redirected)
+model.Data.table()
+item = model.Calc[1]
+item.prime()
+# A standard bound method on a different Index still changes this lookup.
+redirected.index.levels[0].get_loc = pd.Index(['B', 'A']).get_loc
+with count(redirected) as hits:
+    assert item.anchors() == [(0, 1.0), (10, 2.0)] and hits == ['A']
+
+
+class ReversedFrame(pd.DataFrame):
+    @property
+    def iloc(self):
+        original = super().iloc
+
+        class Reverse:
+            def __getitem__(self, key):
+                return original[key].iloc[::-1]
+
+        return Reverse()
+
+
+reclassified = base.copy()
+model = fresh(reclassified)
+model.Data.table()
+item = model.Calc[1]
+item.prime()
+reclassified.__class__ = ReversedFrame
+with count(reclassified) as hits:
     assert item.anchors() == [(10, 8.0), (0, 4.0)] and hits == ['A']
 
 replaced = base.copy()

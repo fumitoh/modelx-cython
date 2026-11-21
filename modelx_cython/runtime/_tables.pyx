@@ -24,11 +24,14 @@ import pandas as pd
 cdef Py_ssize_t _GRID_LIMIT = 65536
 cdef long long _COMBINED_LIMIT = 1LL << 62
 cdef int _MAX_LEVELS = 8
+cdef object _zip_attrs = pd.DataFrame.attrs
 cdef object _zip_loc = pd.DataFrame.loc
 cdef object _zip_accessor_type = type(pd.DataFrame().loc)
 cdef object _zip_accessor_getitem = _zip_accessor_type.__getitem__
 cdef object _zip_frame_getitem = pd.DataFrame.__getitem__
 cdef object _zip_xs = pd.DataFrame.xs
+cdef object _zip_levels = pd.MultiIndex.levels
+cdef object _zip_level_get_loc = pd.Index.get_loc
 
 
 cdef extern from "Python.h":
@@ -446,9 +449,11 @@ cdef object prepared(object frame):
         entry = _prepared.get(key)
     if entry is not None and entry[0]() is frame:
         return entry[1]
+    signatures = _thread_signatures()
+    axes = _zip_origin(frame, signatures)
     table = prepare(frame)
     if table is not None:
-        _decide(table)          # the kind verdicts of every read of the model, once per prepared table
+        _decide(table, signatures, axes)
     ref = weakref.ref(frame, lambda _, key=key: _forget(key))
     with _lock:
         _prepared[key] = (ref, table)
@@ -515,20 +520,38 @@ cdef object bind_own(object frame):
     table = prepare(frame)
     if table is None:
         return _NOT_PREPARED
-    _decide(table)
+    _decide(table, _thread_signatures(), None)
     return table
 
 
-cdef Py_ssize_t _zip_slot(PreparedTable table, object label):
+cdef object _zip_origin(object frame, object signatures):
+    """Capture axes before pandas can copy metadata during preparation."""
+    if (type(frame) is not pd.DataFrame or pd.DataFrame.attrs is not _zip_attrs
+            or not any(kind == -7 for _, _, _, kind in signatures)):
+        return None
+    attrs = frame.attrs
+    if type(attrs) is not dict or attrs:
+        return None
+    index, columns = frame.index, frame.columns
+    if type(index) is pd.MultiIndex and type(columns) is pd.Index:
+        return index, columns
+    return None
+
+
+cdef Py_ssize_t _zip_slot(PreparedTable table, object label, object axes):
     """Admit the narrow ordered ZIP shape at the original Data Cell's bind."""
+    if axes is None:
+        return -1
     frame = table._source()
     if (type(frame) is not pd.DataFrame or table.nlevels != 2 or not table.ordered_within[1]
             or pd.DataFrame.loc is not _zip_loc or pd.DataFrame.__getitem__ is not _zip_frame_getitem
-            or pd.DataFrame.xs is not _zip_xs):
+            or pd.DataFrame.xs is not _zip_xs or pd.MultiIndex.levels is not _zip_levels):
         return -1
-    index, columns = frame.index, frame.columns
-    if (type(index) is not pd.MultiIndex or type(columns) is not pd.Index
-            or type(index.levels[0]) is not pd.Index or type(index.levels[1]) is not pd.Index
+    index, columns = axes
+    prefix = index.levels[0]
+    if (frame.index is not index or frame.columns is not columns
+            or type(prefix) is not pd.Index or type(index.levels[1]) is not pd.Index
+            or not _zip_method(prefix.get_loc, prefix, _zip_level_get_loc)
             or index.levels[1].dtype != np.dtype('int64')
             or any(type(key) is not str for key in table.level_labels[0])
             or any(type(name) is not str for name in columns)):
@@ -536,11 +559,15 @@ cdef Py_ssize_t _zip_slot(PreparedTable table, object label):
     cdef Py_ssize_t position = table.column_positions.get(label, -1)
     if position < 0 or table.column_kind[position] != COLUMN_F64:
         return -1
-    table._zip_axes = index, columns
+    table._zip_axes = axes
     return table.column_slot[position] + 1
 
 
-cdef void _decide(PreparedTable table):
+cdef inline bint _zip_method(object method, object owner, object implementation):
+    return type(method) is MethodType and method.__self__ is owner and method.__func__ is implementation
+
+
+cdef void _decide(PreparedTable table, object signatures, object zip_axes):
     """T-4.2: decide, once per prepared table, the slot of every read signature of the model:
     (levels, columns, label, kind) ->
     - ``levels``: one letter per index level, ``i`` for a level a read takes integer keys on (it must still be an
@@ -556,7 +583,7 @@ cdef void _decide(PreparedTable table):
     cdef int level
     cdef Py_ssize_t position
     slots = []
-    for levels, columns, label, kind in _thread_signatures():
+    for levels, columns, label, kind in signatures:
         result = len(levels) == table.nlevels
         if result:
             for level in range(table.nlevels):
@@ -575,7 +602,7 @@ cdef void _decide(PreparedTable table):
         value = -1
         if result:
             if kind == -7:
-                value = _zip_slot(table, label)
+                value = _zip_slot(table, label, zip_axes)
             elif kind == -6:      # T-5: level label[1] is named label[0] and is an int level (get_level_values)
                 value = 1 if (label[1] < table.nlevels and (label[0] is None or table.level_names[label[1]] == label[0])
                               and table.level_kind[label[1]] != LEVEL_OBJECT and table.nrows > 0) else -1
@@ -740,7 +767,7 @@ cdef object zip_prepared_prefix(object prepared, object frame, object accessor, 
     cdef PreparedRef ref
     cdef Py_ssize_t column, row, start, stop
     cdef long long bounds
-    if type(prepared) is not PreparedTable or type(key) is not str:
+    if type(prepared) is not PreparedTable or type(frame) is not pd.DataFrame or type(key) is not str:
         return None
     table = <PreparedTable>prepared
     ref = <PreparedRef>table
@@ -750,10 +777,14 @@ cdef object zip_prepared_prefix(object prepared, object frame, object accessor, 
     index, columns = table._zip_axes
     if (frame.index is not index or frame.columns is not columns or type(accessor) is not _zip_accessor_type
             or _zip_accessor_type.__getitem__ is not _zip_accessor_getitem or pd.DataFrame.loc is not _zip_loc
-            or pd.DataFrame.__getitem__ is not _zip_frame_getitem or pd.DataFrame.xs is not _zip_xs):
+            or pd.DataFrame.__getitem__ is not _zip_frame_getitem or pd.DataFrame.xs is not _zip_xs
+            or pd.MultiIndex.levels is not _zip_levels):
         return None
-    xs = frame.xs
-    if type(xs) is not MethodType or xs.__func__ is not _zip_xs:
+    prefix = index.levels[0]
+    if (type(prefix) is not pd.Index or not _zip_method(prefix.get_loc, prefix, _zip_level_get_loc)
+            or not _zip_method(frame.xs, frame, _zip_xs)):
+        return None
+    if pd.DataFrame.attrs is not _zip_attrs:
         return None
     attrs = frame.attrs
     if type(attrs) is not dict or attrs:

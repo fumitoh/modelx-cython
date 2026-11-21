@@ -60,8 +60,9 @@ One entry per cell that reads a table, one record per read site:
 
 The terminal ZIP form uses the snapshot published by the frame Cell at its ordinary bind. The compiler admits
 only an exact receiver and an already cached string selector or an existing held native field read. The
-frame and its axes must still match that binding, and its metadata must be empty. Otherwise the formula
-uses its captured pandas accessor. Input check mode leaves this form on pandas.
+frame and its axes must still match what the binder saw before preparation. Frame metadata must be empty
+both before preparation and at the read. Otherwise the formula uses its captured pandas accessor. Input
+check mode leaves this form on pandas.
 
 ## Input changes
 
