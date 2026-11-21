@@ -56,6 +56,8 @@ class Constants(FormulaTransformer):
         self.enum_locals = {}       # D83: local -> enum Ref of a member-valued C integer local
 
     def visit_FunctionDef(self, node):
+        from .reductions import formula_lines
+        self.lines = formula_lines(node)
         assignments = {}
         invalid = set()
         nodes = list(lexical_nodes(node.body.body))
@@ -517,7 +519,8 @@ class Constants(FormulaTransformer):
             for element in node.elements)
 
     def decline(self, node, reason):
-        pass
+        from .reductions import untyped_entry
+        self.untyped.append(untyped_entry(self.lines, node, 'in', reason))
 
     def leave_Call(self, before, after):
         func = after.func
@@ -541,7 +544,8 @@ class Constants(FormulaTransformer):
 
 
 def _untyped(lines, node, form, reason):
-    pass
+    from .reductions import untyped_entry
+    return untyped_entry(lines, node, form, reason)
 
 
 class _MemberFields(cst.CSTTransformer):

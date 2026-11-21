@@ -602,6 +602,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self._uses_native_round = False
         self.helper_providers = set()
         cells = [cell for cls in module.classes.values() for cell in cls.cells.values()]
         self.object_providers = {binding.manifest.provider: binding.manifest
@@ -618,6 +619,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._vector_counter = [0]
         code_enums.prepare(module)
 
+    def _reserve_cold_sum(self):
+        while True:
+            name = f'_mx_cold_sum_{self._next_cold_sum}'
+            self._next_cold_sum += 1
+            if name not in self._source:
+                return name
+
     def _compact_spill(self, cells, cls_name, source):
         index = len(self._cold_spills)
         name = f'_mx_compact_spill_{index}'
@@ -631,13 +639,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             + textwrap.indent(source, '    ')))
         return name, f'{name}(self, {", ".join(cells.params)})'
 
-    def _rewrite_powers(self, node, cls_info, cells, scope=None):
+    def _rewrite_powers(self, node, cls_info, cells, scope):
         """Rewrite the provably real ``**`` of one formula body.
 
         See :mod:`modelx_cython.powers`; the node is returned unchanged
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
+        from modelx_cython.rounding import RoundedInputs
         from modelx_cython import vectors, held_arrays
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
@@ -649,20 +658,81 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node = self._table_reads_with_row_fields(node, cls_info, cells, 'int' in builtin_keys)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
+        if not self.module.spec.policy.native_math:
+            builtin_keys.discard('round')
+        rounded_inputs = RoundedInputs(cls_info, cells, self.helper_providers, builtin_keys,
+                                        self._resolver)
+        node = node.visit(rounded_inputs)
         self._table_reads_report(cells)
+        if 'round' in builtin_keys and '_mx_canonical_round' not in self._source:
+            from modelx_cython.rounding import NativeRounding
+            rounding = NativeRounding()
+            node = node.with_changes(body=node.body.visit(rounding))
+            self._uses_native_round |= rounding.used
+        if not hasattr(cls_info, 'native_contexts'):
+            cls_info.native_contexts = {}
+        cls_info.native_contexts.update(rounded_inputs.contexts)
+        # Keep the qualified typed kernels behind the common helper contracts.
+        # The same CST/type facts select their native domain; unsupported source
+        # and values keep ordinary object-capable Cython and current callables.
+        from modelx_cython.reductions import BUILTIN_REDUCTIONS, NativeReductions, has_reduction_contract
+        reductions = None
+        cells.native_reductions = 0
+        cells.exact_reduction_guards = ()
+        builtin_reductions = builtin_keys & BUILTIN_REDUCTIONS
+        if has_reduction_contract(node, cls_info.refs, builtin_reductions):
+            builtin_bounds = all(isinstance(binding, BuiltinAssignment)
+                                 for name in ("range", "min", "max", "abs", "StopIteration", "RuntimeError")
+                                 for binding in scope[name])
+            from modelx_cython.powers import formula_local_kinds, kind_of_type_expr, KIND_INT, KIND_FLOAT
+            param_kinds = ({name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
+                            for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {})
+            local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
+                                              self._ref_kinds, cls_info.fqname, param_kinds)
+            reductions = NativeReductions(
+                cls_info, cells, self.helper_providers, node, self._reserve_cold_sum, builtin_bounds,
+                builtin_reductions, self.module.code_enum_symbols,
+                formula_kinds={name: {KIND_INT: 'longlong', KIND_FLOAT: 'double'}[kind]
+                               for name, kind in local_kinds.items() if kind in (KIND_INT, KIND_FLOAT)})
+            node = node.visit(reductions)
+            cells.native_reductions = reductions.count
+            cells.native_tuple_int_loops = getattr(reductions, 'tuple_int_loops', 0)   # diag-scale P3
+            cells.exact_reduction_guards = reductions.exact_receiver_guards
         enum_comparisons = code_enums.Constants(cls_info, cells, self.module.code_enum_symbols)
         node = node.visit(enum_comparisons)
         cells.native_enum_comparisons = enum_comparisons.comparisons
         cells.native_enum_constants = enum_comparisons.count
+        operations = set(rounded_inputs.operations)
+        node = self._bind_declared_helpers(node, cls_info, cells, operations)
+        admitted_helpers = set(cells.native_helpers)
+        for fallback in reductions.fallbacks if reductions is not None else ():
+            self._cold_sums.append(self._bind_declared_helpers(fallback, cls_info, cells, rounded_inputs.operations))
+            admitted_helpers.update(cells.native_helpers)
+        cells.native_helpers = sorted(admitted_helpers)
+        cells.native_numeric_helpers = sorted(rounded_inputs.operations)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
-            cls_info.fqname, cells,
+            cls_info.fqname, cells, builtin_float='float' in builtin_keys,
             checked_integer_powers=self.module.spec.policy.integer_checks != 'unchecked',
         )
+        from modelx_cython.ordered_arguments import preserve_argument_order
+        from modelx_cython.powers import OperandKind, kind_of_type_expr, formula_local_kinds
+        param_kinds = {name: kind_of_type_expr(cells.get_argtype_expr(name, c_style=True, formula=True))
+                       for name in cells.params} if cells.has_args() and cells.has_typeinfo() else {}
+        # locals proven of one kind by every assignment (D59): `k = calendar_year(t) - year`
+        # then `base ** k` is an integer exponent, as the same expression written inline is
+        local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
+                                          self._ref_kinds, cls_info.fqname, param_kinds)
+        node = preserve_argument_order(node,
+            native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
+            operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
+                                     cls_info.fqname, {**local_kinds, **param_kinds}),
+            cells=cells, providers=self.helper_providers)
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
+
     def _table_reads(self, node, cls_info, cells, builtin_int):
         """Lower and report table reads before the remaining formula transforms."""
         return self._table_reads_lowered(node, cls_info, cells, builtin_int)
@@ -923,6 +993,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         stmts = []
         from modelx_cython.helpers import module_name
         from modelx_cython.exceptions import NumericExceptions
+        if self._uses_native_round:
+            from modelx_cython.rounding import ROUND_BINDING
+            stmts.extend(cst.parse_module(ROUND_BINDING).body)
         for provider in sorted(self.helper_providers):
             stmts.append(cst.parse_statement(
                 f'from cython.cimports.{self.package} import {module_name(provider)}'))
@@ -958,11 +1031,20 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills,
                                                *(stmt for held in self._held_arrays.values() for stmt in held.body)))
         directives = []
+        if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
+               for cell in cls.cells.values()):
+            # Native memo structs contain only scalars. Use Cython's standard
+            # serializer; the module directive also works in pure-Python mode.
+            directives.append('auto_pickle=True')
         # integer guards: overflow checks only in the checked mode (owner's rule), with or without type
         # inference: a formula's typed C integer arithmetic (Cell results, typed parameters) is C
         # arithmetic either way
         checked = self.module.spec.policy.integer_checks != 'unchecked'
-        if checked:
+        if self.module.spec.policy.infer_types:
+            # M1 (spec key infer_types): C integer inference in generated model modules; providers keep
+            # their own directives.
+            directives.append(f'infer_types=True, overflowcheck={checked}')
+        elif checked:
             directives.append('overflowcheck=True')
         if directives:
             module = module.with_changes(header=(
@@ -1088,8 +1170,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 decl_stmts.append(stmt)
 
             from modelx_cython.helpers import module_name
+            for cell in self.module.classes[cls_name].cells.values():
+                if memo := getattr(cell, 'power_memo', None):
+                    decl_stmts.append(cst.parse_statement(f'{memo}: {MX_SYS_MOD}.PowerMemo\n'))
+            contexts = getattr(self.module.classes[cls_name], 'native_contexts', {})
+            for name, provider in contexts.items():
+                decl_stmts.append(cst.parse_statement(f'{name}: {module_name(provider)}.LookupContext\n'))
             decl_stmts.extend(cst.parse_statement(line)
                               for line in holds.py_declarations(self.module.classes[cls_name]))
+            if contexts:
+                body = []
+                for statement in updated_node.body.body:
+                    if isinstance(statement, cst.FunctionDef) and statement.name.value == '__init__':
+                        assignments = [cst.parse_statement(f'self.{name} = {module_name(provider)}.LookupContext()\n')
+                                       for name,provider in contexts.items()]
+                        statement = statement.with_changes(body=statement.body.with_changes(
+                            body=(*statement.body.body, *assignments)))
+                    body.append(statement)
+                updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
             decorator = cst.Decorator(

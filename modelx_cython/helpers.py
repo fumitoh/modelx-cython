@@ -232,7 +232,8 @@ class HelperCalls(FormulaTransformer):
         return borrowed_namespace(value)
 
     def decline(self, node, reason):
-        pass
+        from .reductions import untyped_entry
+        self.math_untyped.append(untyped_entry(getattr(self, 'line_of', None), node, 'math', reason))
 
     def leave_Call(self, original, updated):
         math = self.module_math(original, updated)

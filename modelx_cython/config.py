@@ -41,6 +41,10 @@ class CompilerPolicy:
     dense_one_axis: bool
     propagate_exact_receiver: bool
     native_cache_hits: str
+    native_math: bool  # Guarded builtin rounding.
+    # M1 (W1.1, default on since W1.5): '# cython: infer_types=True, overflowcheck=True'
+    # on generated model modules.
+    infer_types: bool = True
     # M1 (W1.3): lower pandas-spelled table reads to typed handle reads (table_reads.py).
     # On by default since the runtime handles (W1.2) landed (D45).
     typed_table_reads: bool = True
@@ -74,6 +78,8 @@ class CompilerPolicy:
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
             native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
+            native_math=data.get('native_math', True),
+            infer_types=data.get('infer_types', True),
             typed_table_reads=data.get('typed_table_reads', True),
             held_table_handles=data.get('held_table_handles', True),
             strict_tables=data.get('strict_tables', os.environ.get('MX_CY_STRICT_TABLES') == '1'),
@@ -112,6 +118,7 @@ def resolve_integer_checks(policy, largest_traced_integer):
     if policy.integer_checks != 'auto':
         return policy.integer_checks
     return 'unchecked' if largest_traced_integer < UNCHECKED_LIMIT else 'checked'
+
 
 class TransSpec:
     """Wrapper around the user-supplied translation-spec dictionary.
@@ -171,6 +178,9 @@ class TransSpec:
     ``"propagate_exact_receiver"`` carries the receiver fact through those
     entries and private dense formula calls. ``"native_math"`` enables guarded
     builtin rounding by default.
+    ``"infer_types"`` (default true): C type inference (``# cython: infer_types=True``) in
+    generated model modules; false keeps Cython's default (no inference of C types for untyped
+    locals). Overflow checks follow ``"integer_checks"`` either way.
     ``"integer_checks"`` (default ``"auto"``): ``"unchecked"`` compiles C integer arithmetic
     without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
     no traced integer (Cell arguments and results, References, ItemSpace parameters, integer

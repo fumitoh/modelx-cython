@@ -415,6 +415,10 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
+        if getattr(logger, 'read_notes_by_text', None) is not None:
+            from modelx_cython.frame_reads import audit_subtables
+            audit_subtables(module_infos, translated_modules, resolver)
+
         provider_sources = install_helpers(helper_providers, model_path, object_providers)
         modules.extend(provider_sources)
         translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
@@ -422,7 +426,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         for u in units:
             state = guard_integer_boundaries(
                 translated_modules[u.fqname], u.module_info, resolver, cells_kinds, ref_kinds,
-                cells_by_name, infer_types=False,
+                cells_by_name, infer_types=policy.infer_types,
             )
             # api-tables (D101a, D103): the last pass, after every pass that looks cells up by name
             from modelx_cython import table_cells
@@ -439,6 +443,63 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
+        if policy.prepared_tables:      # T-4 item 0: the read signatures, decided per table when it is prepared
+            signatures = getattr(resolver, 'table_signatures', {})
+            ordered = [key for key, _ in sorted(signatures.items(), key=lambda item: item[1])]
+            (model_path / '_mx_table_signatures.py').write_text(
+                '# Generated: the index and column kinds each fast table read is compiled for, by id (T-4).\n'
+                'SIGNATURES = (\n' + ''.join(f'    {signature!r},\n' for signature in ordered) + ')\n',
+                encoding='utf-8')
+        if policy.prepared_tables:      # T-3: the build report of table reads (doc table_reads.md)
+            from modelx_cython.table_cells import path_of
+            from modelx_cython.table_cells import frame_cell
+            reads = {path_of(cls, cell.name): cell.frame_reads
+                     for info in module_infos.values() for cls in info.classes.values()
+                     for cell in cls.cells.values() if getattr(cell, 'frame_reads', None)}
+            # T-4: the frame cells prepared when their value is computed or assigned (bind); any other frame
+            # read fast is prepared on its first read
+            reads['_prepared_at_bind'] = sorted(
+                path_of(cls, cell.name) for info in module_infos.values() for cls in info.classes.values()
+                if cls.name not in cls.visitor.itemspace_classes
+                for cell in cls.cells.values() if not cell.has_args() and cell.has_formula_def
+                and frame_cell(cls, cell))
+            (model_path / '_mx_table_reads.json').write_text(json.dumps(reads, indent=1, sort_keys=True),
+                                                             encoding='utf-8')
+        if getattr(logger, 'read_notes_by_text', None) is not None:
+            audit = {path_of(cls, cell.name): cell.read_audit
+                     for info in module_infos.values() for cls in info.classes.values()
+                     for cell in cls.cells.values() if getattr(cell, 'read_audit', None)}
+            cells_all = [cell for info in module_infos.values() for cls in info.classes.values() for cell in cls.cells.values()]
+            lowered = sum(1 for cell in cells_all for e in (getattr(cell, 'frame_reads', None) or ()) if 'reason' not in e)
+            unsampled = sum(getattr(cell, 'read_unsampled_lowered', 0) for cell in cells_all)
+            entries = [e for v in audit.values() for e in v]
+            operations = [e for e in entries if e.get('pandas_operation')]
+            reads = [e for e in entries if not e.get('pandas_operation')]
+            audit['_summary'] = {
+                'lowered': lowered, 'lowered_not_reached_by_the_sample': unsampled,
+                'left_on_pandas_per_step': sum(1 for e in reads if e['per_step'] and e['evaluations']),
+                'left_on_pandas_per_policy': sum(1 for e in reads if not e['per_step'] and e['evaluations']),
+                'left_on_pandas_not_reached_by_the_sample': sum(1 for e in reads if not e['evaluations']),
+                'pandas_operations_per_step': sum(1 for e in operations if e['per_step']),
+                'pandas_operations_per_policy': sum(1 for e in operations if not e['per_step'])}
+            (model_path / '_mx_read_audit.json').write_text(json.dumps(audit, indent=1, sort_keys=True), encoding='utf-8')
+            per_step = []
+            for name, found in sorted(audit.items()):
+                if name == '_summary':
+                    continue
+                for entry in found:
+                    if entry['per_step']:
+                        warning = f"{name}: {entry['expression']} ({entry['reason']})"
+                        if entry.get('pandas_operation'):
+                            _logger.warning('pandas operation in a per-step cell: %s', warning)
+                        else:
+                            per_step.append(warning)
+                            _logger.warning('table read left on pandas in a per-step cell: %s', warning)
+            if policy.strict_tables and per_step:
+                raise HandlerError('strict_tables: table reads left on pandas in per-step cells: ' + '; '.join(per_step))
+        if getattr(logger, 'read_notes_json', None) is not None:
+            (model_path / '_mx_read_notes.json').write_text(json.dumps(logger.read_notes_json, indent=1),
+                                                            encoding='utf-8')
 
     if args.translate_only:
         return 0
