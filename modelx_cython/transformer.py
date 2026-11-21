@@ -66,6 +66,9 @@ from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
 from modelx_cython.powers import rewrite_powers
+from modelx_cython.inline_entries import add_inline_entries, allows_exact_receiver
+from modelx_cython.cell_entries import CacheHit, DenseEntry, dense_condition
+from modelx_cython import numeric_cache
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -84,7 +87,46 @@ from modelx_cython.consts import (
     is_user_defined,
 )
 
-from modelx_cython.typedefs import CY_BOOL_T
+from modelx_cython.syntax import dotted_name, literal_value, same_expression
+from modelx_cython.typedefs import CY_BOOL_T, CY_INT_T, primitive_kind
+
+
+def _integer_reference_paths(cls_info):
+    """Return qualified names of writable References stored as C integers."""
+    lexical_refs = cls_info.visitor.ref_info.get(cls_info.name, {})
+    fixed_refs = getattr(cls_info, 'readonly_refs', ())
+    owners = [part[len(MODULE_PREF):] for part in cls_info.module.fqname.split('.')[1:-1]]
+    owners.append(cls_info.name[len(SPACE_PREF):])
+    return {
+        name: '.'.join((*owners, name))
+        for name in lexical_refs
+        if name not in cls_info.spaces
+        and name not in fixed_refs
+        and cls_info.refs[name].get_type_expr(c_style=True) == CY_INT_T
+    }
+
+
+def _outside_logical_domain(cell, axes):
+    bounds = ', '.join(f'{axis.key} in [{axis.lower}, {axis.stop})' for axis in axes)
+    message = (f'{cell.model_path}: argument index out of range. Expected {bounds}. '
+               f'Sample the required indices or set {TransSpec.CELLS_PARAM_SIZE!r} in the spec.')
+    return f'raise IndexError({message!r})\n'
+
+
+def _guard_associative_cache(cell, body):
+    axes = cell.associative_logical_axes if cell.has_typeinfo() else ()
+    condition = dense_condition(axes)
+    if not condition or condition == "True":
+        return body
+    outside = textwrap.indent(_outside_logical_domain(cell, axes), '    ')
+    guard = cst.parse_statement(f'if not ({condition}):\n{outside}')
+    return body.with_changes(body=(guard, *body.body))
+
+
+
+_logger = logging.getLogger(__name__)
+HELPER_TABLE_READ = 'the receiver is a helper Table and the formula uses its Python methods'
+
 
 class PXDGenerator:
     """Generate a Cython ``.pxd`` declaration file for a model module.
@@ -157,6 +199,8 @@ class PXDGenerator:
         """
         stmts = []
         from modelx_cython.helpers import module_name
+        for provider in sorted(numeric_cache.providers(self.module)):
+            stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
         contexts = {provider for cls in self.module.classes.values()
@@ -285,10 +329,13 @@ class PXDGenerator:
                     decl_stmts.append(f"cdef {var_type} {var_name}\n")
 
                     has_name = HAS_PREF + cells.name
-                    has_type = cells.get_array_decl_expr(
-                                rettype_expr=CY_BOOL_T, c_style=True)
+                    has_type = cells.get_readiness_array_decl_expr(c_style=True)
                     decl_stmts.append(f"cdef {has_type} {has_name}\n")
+                    if cells.has_dense_spill:
+                        decl_stmts.append(f"cdef dict _spill_{cells.name}\n")
 
+                elif cells.uses_native_numeric_cache:
+                    decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -532,6 +579,24 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                  for cell in cells if (binding := cell.observed_provider_type)}
         self.helper_providers.update(binding.manifest.provider for cell in cells
                                      if (binding := cell.native_provider_binding))
+        self.dense_entries = {}
+        self.formula_entries = {}
+        self.function_origins = {}      # D139: {private entry of an uncached Cell: (class, Cell)}
+        self.entry_domains = {}         # D139b: {private entry of an uncached Cell: its argument domain}
+        self.helper_providers.update(numeric_cache.providers(module))
+
+    def _compact_spill(self, cells, cls_name, source):
+        index = len(self._cold_spills)
+        name = f'_mx_compact_spill_{index}'
+        while name in self._source:
+            name += '_'
+        params = ', '.join(f'{p}: {cells.get_argtype_expr(p)}' for p in cells.params)
+        result = cells.get_rettype_expr()
+        self._cold_spills.append(cst.parse_statement(
+            f'\n\n@{CY_MOD}.cfunc\n@{CY_MOD}.exceptval(-1, check=True)\n'
+            f'def {name}(self: {cls_name}, {params}) -> {result}:\n'
+            + textwrap.indent(source, '    ')))
+        return name, f'{name}(self, {", ".join(cells.params)})'
 
     def _rewrite_powers(self, node, cls_info, cells, scope=None):
         """Rewrite the provably real ``**`` of one formula body.
@@ -543,12 +608,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
+        cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         node = rewrite_powers(
             node, self._resolver, self._cells_kinds, self._ref_kinds,
             cls_info.fqname, cells,
             checked_integer_powers=self.module.spec.policy.integer_checks != 'unchecked',
         )
+        # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
+        from modelx_cython.item_locals import type_item_locals
+        node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
     def _bind_declared_helpers(self, node, cls_info, cells, inherited=()):
         """Bind declared provider symbols in either C functions or compiled defs.
@@ -615,6 +684,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 *updated_node.body,
             )
         )
+        scope = self.get_metadata(ScopeProvider, original_node)
+        if not any(assignment.name == "type" for assignment in scope.assignments):
+            # Exact type alone cannot rule out overrides on a receiver with a dict.
+            ordinary = {name: cls for name, cls in self.module.classes.items()
+                        if name not in self.module.visitor.dynamic_ref_classes}
+            (module, self.dense_entries, self.formula_entries, self.function_origins,
+             self.entry_domains) = add_inline_entries(
+                module, ordinary, self._dense_layouts)
+        if self._cold_sums or self._cold_spills:
+            module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills))
         directives = []
         # integer guards: overflow checks only in the checked mode (owner's rule), with or without type
         # inference: a formula's typed C integer arithmetic (Cell results, typed parameters) is C
@@ -670,12 +749,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                 HAS_PREF
                                 + cells.name
                                 + ": "
-                                + cells.get_array_decl_expr(
-                                    rettype_expr=f"{CY_MOD}.{CY_BOOL_T}",
-                                ),
+                                + cells.get_readiness_array_decl_expr(),
                                 config=self._module_node.config_for_parsing,
                             )
                         )
+                        if cells.has_dense_spill:
+                            decl_stmts.append(cst.parse_statement(f'_spill_{cells.name}: dict\n'))
+                    elif cells.uses_native_numeric_cache:
+                        decl_stmts.append(cst.parse_statement(
+                            f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -887,6 +969,41 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         ``_mx_copy_refs`` method bodies."""
         return updated_node.with_changes(value="base_")
 
+    def _guard_reference_assignments(self, cls_info, method):
+        """Check generated integer Reference writes with an object source."""
+        integer_refs = _integer_reference_paths(cls_info)
+        if not integer_refs:
+            return method
+        guard = cst.parse_expression(f'{MX_SYS_MOD}._mx_exact_int64')
+        single_assignment = m.SimpleStatementLine(body=(m.Assign(targets=(m.AssignTarget(),)),))
+        body = []
+        for line in method.body.body:
+            if not m.matches(line, single_assignment):
+                body.append(line)
+                continue
+            assignment = line.body[0]
+            target = dotted_name(assignment.targets[0].target) or ''
+            receiver, _, name = target.rpartition('.')
+            if receiver != MX_SELF or name not in integer_refs:
+                body.append(line)
+                continue
+
+            value = assignment.value
+            if method.name.value == MX_COPY_REFS and dotted_name(value) == f'base_.{name}':
+                body.append(line)
+                continue
+            try:
+                literal = literal_value(value)
+            except ValueError:
+                literal = None
+            if primitive_kind(literal) == 'longlong':
+                body.append(line)
+                continue
+            path = cst.SimpleString(repr(integer_refs[name]))
+            checked = cst.Call(guard, (cst.Arg(value), cst.Arg(path)))
+            body.append(line.with_changes(body=(assignment.with_changes(value=checked),)))
+        return method.with_changes(body=method.body.with_changes(body=tuple(body)))
+
     @m.call_if_inside(m.ClassDef())
     @m.leave(m.FunctionDef())
     def update_method(self, original_node, updated_node):
@@ -921,6 +1038,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             meth_name = original_node.name.value
             cls_info = self.module.classes[cls_name]
 
+            if meth_name == '__init__':
+                initializers = []
+                for cell in cls_info.cells.values():
+                    if cell.uses_native_numeric_cache:
+                        initializers.append(cst.parse_statement(
+                            f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
+                        ))
+                return updated_node.with_changes(body=updated_node.body.with_changes(
+                    body=(*updated_node.body.body, *initializers)))
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 cells = cls_info.cells.get(meth_name[len(FORMULA_PREF):])
@@ -1061,7 +1187,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     if cells.has_typeinfo() and cells.is_arrayable():
 
                         # Construct indented_block to replace the original one
-                        c_idx_expr = ''.join([f"[{p}]" for p in cells.params])
+                        axes = cells.dense_axes
+                        c_idx_expr = ''.join(f'[{axis.index_expr}]' for axis in axes)
                         param_expr = f"{', '.join([p for p in cells.params])}"
 
                         has_expr = f"{MX_SELF}.{HAS_PREF}{meth_name}{c_idx_expr}"
@@ -1069,31 +1196,74 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         f_expr = f"{MX_SELF}.{FORMULA_PREF}{meth_name}({param_expr})"
 
                         args = tuple(cells.params)
-                        size = cls_info.cells_arg_sizes[args]
+                        idx_range = dense_condition(axes)
 
-                        idx_range = " and ".join(
-                            [f"(0 <= {p} < {i})" for p, i in zip(args, size)])
-
+                        # A shared Space's dense cache is filled by concurrent workers: its flag is
+                        # published after the value (release) and read before it (acquire).
+                        published = not cells.is_locked and not numeric_cache.exclusively_owned(cells)
+                        ready_expr = (f"{MX_SYS_MOD}._mx_load_dense_flag({CY_MOD}.address({has_expr}))"
+                                      if published else has_expr)
+                        ready_store = (f"{MX_SYS_MOD}._mx_store_dense_flag({CY_MOD}.address({has_expr}), True)"
+                                       if published else f"{has_expr} = True")
                         if cells.is_locked:
                             cache_body = self._locked_body(
                                 has_expr, v_expr, f_expr, indent=4)
                         else:
                             cache_body = textwrap.dedent(f"""\
-                                if {has_expr}:
+                                if {ready_expr}:
                                     return {v_expr}
                                 else:
                                     val = {f_expr}
                                     {v_expr} = val
-                                    {has_expr} = True
+                                    {ready_store}
                                     return val
                                 """)
+                        logical_axes = cells.dense_logical_axes
+                        logical_guard = dense_condition(logical_axes)
+                        outside = _outside_logical_domain(cells, logical_axes)
+                        spill_branch = ''
+                        spill_entry = None
+                        if cells.has_dense_spill:
+                            key = '(' + ', '.join(args) + (',' if len(args)==1 else '') + ')'
+                            cache = f'self._spill_{meth_name}'
+                            value = 'val'
+                            while value in args:
+                                value += '_'
+                            spill = (f'if {cache} is None:\n    {cache} = {{}}\n'
+                                     f'try:\n    return {cache}[{key}]\n'
+                                     f'except KeyError:\n    pass\n'
+                                     f'{value} = {f_expr}\n{cache}[{key}] = {value}\nreturn {value}\n')
+                            if cells.is_locked:
+                                spill = f'with self.{MX_LOCK}:\n' + textwrap.indent(spill, '    ')
+                            if cells.has_inferred_dense_domain or cells.has_shifted_cache:
+                                spill = (f'if not ({logical_guard}):\n'
+                                         + textwrap.indent(outside, '    ') + spill)
+                            if cells.has_inferred_dense_domain:
+                                spill_entry, helper = self._compact_spill(cells, cls_name, spill)
+                                outside = f'return {helper}\n'
+                            elif cells.has_shifted_cache:
+                                outside = spill
+                            else:
+                                spill_entry, helper = self._compact_spill(cells, cls_name, spill)
+                                spill_branch = f'elif {logical_guard}:\n    return {helper}\n'
                         if_stmt = (
                             f"if {idx_range}:\n"
                             + textwrap.indent(cache_body, " " * 4)
+                            + spill_branch
                             + "else:\n"
-                            + '    raise IndexError("array index out of range")\n')
+                            + textwrap.indent(outside, '    '))
                         if_node = cst.parse_statement(
                             if_stmt, config=self._module_node.config_for_parsing
+                        )
+                        hit = None
+                        if not cells.is_locked and len(axes) == 1 and axes[0].c_type == 'long long':
+                            hit = CacheHit(cst.parse_expression(ready_expr),
+                                           cst.parse_expression(v_expr), if_node.test)
+                        self._dense_layouts[cls_name, meth_name] = DenseEntry(
+                            cls_name, FORMULA_PREF + meth_name, axes, cells.has_dense_spill,
+                            logical_axes if spill_entry else (), spill_entry,
+                            spill_entry is not None and cells.has_inferred_dense_domain,
+                            if_node.test, hit,
                         )
                         indented_block = cst.ensure_type(
                             updated_node.body, cst.IndentedBlock
@@ -1105,6 +1275,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             returns=returns,
                             body=indented_block,
                         )
+                    elif cells.uses_native_numeric_cache:
+                        body = numeric_cache.body(cells)
+                        from modelx_cython.admission import over_limit_warning, use_warning
+                        if (warning := over_limit_warning(cells)) is not None:
+                            _logger.warning(warning)
+                        if (warning := use_warning(cells)) is not None:
+                            _logger.warning(warning)
                     else:
                         if cells.is_locked:
                             # the exported body is already double-checked
@@ -1112,14 +1289,49 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
-                        return updated_node.with_changes(
-                            decorators=decorators,
-                            params=parameters,
-                            returns=returns,
-                            body=body
-                        )
+                        if binder:
+                            constructor = cst.parse_expression(binder)
+                            formula = m.Call(func=m.Attribute(
+                                value=m.Name(MX_SELF), attr=m.Name(FORMULA_PREF + meth_name)))
+                            body = m.replace(body, formula, lambda call, _: cst.Call(
+                                constructor, (cst.Arg(call), *binding_args)))
+                        key_types = {"bint", "long long", "double"}
+                        if not cells.is_locked:
+                            key_types.add("str")
+                        if (cells.has_typeinfo() and not cells.is_array_returned
+                                and cells.get_rettype_expr(c_style=True)
+                                in {"bint", "long long", "double"}
+                                and all(cells.get_argtype_expr(p, c_style=True)
+                                        in key_types
+                                        for p in cells.params)):
+                            body = self._single_lookup_body(meth_name, body, cells.params)
+                    return updated_node.with_changes(
+                        decorators=decorators,
+                        params=parameters,
+                        returns=returns,
+                        body=_guard_associative_cache(cells, body)
+                    )
                 else:   # No type info, no arg
-                    if cells.is_locked:
+                    flag = f"{MX_SELF}.{HAS_PREF}{meth_name}"
+                    cache = f"{MX_SELF}.{VAR_PREF}{meth_name}"
+                    formula = f"{MX_SELF}.{FORMULA_PREF}{meth_name}()"
+                    if binder:
+                        path = f', {cells.method_fqname!r}' if binding_args else ''
+                        formula = f'{binder}({formula}{path})'
+                    shared = (cells.has_formula_def and not cells.is_locked
+                              and not numeric_cache.exclusively_owned(cells))
+                    if cells.is_locked or binder or shared:
+                        if cells.is_locked:
+                            body = self._locked_body(flag, cache, formula)
+                        elif shared:
+                            body = self._shared_body(flag, cache, formula, cells.get_rettype_expr())
+                        else:
+                            body = (f'if {flag}:\n'
+                                    f'    return {cache}\n'
+                                    'else:\n'
+                                    f'    {cache} = {formula}\n'
+                                    f'    {flag} = True\n'
+                                    f'    return {cache}\n')
                         stmts = cst.parse_module(
                             self._locked_body(
                                 f"{MX_SELF}.{HAS_PREF}{meth_name}",

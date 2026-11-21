@@ -35,6 +35,12 @@ from modelx_cython.consts import (
 @dataclass(frozen=True)
 class CompilerPolicy:
     """Resolve dependent diagnostic options once, before code generation."""
+    automatic_optimizations: bool
+    dense_bounds_proofs: bool
+    dense_miss_binding: bool
+    dense_one_axis: bool
+    propagate_exact_receiver: bool
+    native_cache_hits: str
     # integer guards (owner's rule): 'auto' (default) compiles without overflow checks when no
     # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
     # 'unchecked' force a mode. The build resolves 'auto' after the trace (resolve_integer_checks).
@@ -42,13 +48,27 @@ class CompilerPolicy:
 
     @classmethod
     def resolve(cls, data):
-        values = dict(
+        automatic = data.get('automatic_optimizations', True)
+        miss = data.get('dense_miss_binding', automatic)
+        values = dict(automatic_optimizations=automatic,
+            dense_bounds_proofs=data.get('dense_bounds_proofs', automatic),
+            dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
+            propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
+            native_cache_hits=data.get('native_cache_hits', 'auto' if automatic and miss else 'none'),
             integer_checks=data.get('integer_checks', 'auto'))
         for name, value in values.items():
             if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
                 raise ValueError(f'{name} must be a boolean')
         if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
             raise ValueError('integer_checks must be auto, checked or unchecked')
+        if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
+                'none', 'scalar', 'dense', 'both', 'auto'):
+            raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
+        if not miss:
+            if values['propagate_exact_receiver']:
+                raise ValueError('propagate_exact_receiver requires dense_miss_binding')
+            if values['native_cache_hits'] != 'none':
+                raise ValueError('native_cache_hits requires dense_miss_binding')
         return cls(**values)
 
 
@@ -94,6 +114,19 @@ class TransSpec:
 
     A per-cells dict may have:
 
+    * ``"native_numeric_cache"``: override automatic selection of native numeric
+      key storage for an eligible cell. Other signatures use dictionaries.
+      Both support compiled model pickling. Setting ``"numeric_cache_capacity"``
+      also opts in unless ``"native_numeric_cache"`` is false.
+    * ``"dense_window"``: a sequence of half-open ``(lower, stop)`` pairs
+      in parameter order for a dense cache. The physical window must
+      fit inside the existing logical bounds. A declared window overrides
+      the automatic dense storage size ceiling for an eligible cached Cell.
+      Exact spill keeps the original logical domain available.
+    * ``"native_divisibility"``: enable the checked Cython zero-remainder
+      comparison for proven signed-integer operands.
+    * ``"memoize_power"``: enable a one-entry exact-operand memo for the
+      existing typed power helper on a privately owned policy Space.
     * ``"return_type"``: either a type name accepted by
       :data:`modelx_cython.typedefs.str_to_type` (``"bool"``,
       ``"int"``, ``"float"``, ``"str"``, ``"object"``) that overrides
@@ -107,6 +140,12 @@ class TransSpec:
 
     The ``"space_params"`` and ``"param_type"`` keys are defined
     below but are not currently consumed by the pipeline.
+
+    The top-level ``"dense_one_axis"`` experiment separates checked and proven
+    calls to an existing one-axis dense cache body.
+    ``"propagate_exact_receiver"`` carries the receiver fact through those
+    entries and private dense formula calls. ``"native_math"`` enables guarded
+    builtin rounding by default.
     ``"integer_checks"`` (default ``"auto"``): ``"unchecked"`` compiles C integer arithmetic
     without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
     no traced integer (Cell arguments and results, References, ItemSpace parameters, integer
@@ -114,6 +153,14 @@ class TransSpec:
     mode used and the largest traced integer. Limit of the unchecked mode: intermediate values are
     not traced, so a product of several large terms or an integer power could exceed 64 bits and
     would wrap, as on upstream; set ``"integer_checks": "checked"`` to force the checked mode.
+    ``"native_cache_hits"`` defaults to ``"auto"`` when automatic optimization
+    and dense miss binding are enabled. It selects scalar hits and already-proven
+    dense hits; explicit alternatives are ``"none"``, ``"scalar"``, ``"dense"``
+    and ``"both"``. Hits require ``"dense_miss_binding"``. Misses retain their
+    original entry and Cython exception handling.
+    ``"automatic_optimizations": False`` disables automatic selection and the
+    default dense entry optimizations on every platform. Individual diagnostic
+    options can override these defaults, subject to their dependencies.
 
     Attributes
     ----------
@@ -162,6 +209,7 @@ class TransSpec:
         
         self._data = data
         self.policy = CompilerPolicy.resolve(data)
+        self.automatic_optimizations = self.policy.automatic_optimizations
 
     def get_declared_sizes(self, object_path: str):
         """Return ``(tuples, names)`` of the ``"cells_param_size"`` entries in

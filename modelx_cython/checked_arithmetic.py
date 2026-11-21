@@ -61,7 +61,11 @@ def divisibility_operands(node):
 
 
 def divisibility_enabled(cell):
-    pass
+    from . import automatic
+    enabled = getattr(cell, '_spec', {}).get('native_divisibility', automatic.enabled(cell))
+    if type(enabled) is not bool:
+        raise ValueError('native_divisibility must be a boolean')
+    return enabled
 
 
 def signed_local_assignments(body, name, facts, native_value):

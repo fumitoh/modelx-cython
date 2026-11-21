@@ -49,7 +49,9 @@ from modelx_cython.transformer import ModuleTransformer, PXDGenerator
 from modelx_cython.usage import (
     admit_forwarded_views, analyze_usage, apply_verdicts, build_resolver)
 from modelx_cython.powers import build_kind_maps, demote_rebound_params
+from modelx_cython.admission import describe
 from modelx_cython.cell_entries import EntryModule
+from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.integer_boundaries import guard_integer_boundaries
 from modelx_cython.helpers import install as install_helpers
 from modelx_cython.build import cell_locations, create_setup
@@ -379,6 +381,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         # Phase 3: transform and write out
         helper_providers = set()
         object_providers = {}
+        dense_entries = {}
+        formula_entries = {}
         translated_modules = {}
         for u in units:
             trans = ModuleTransformer(
@@ -389,15 +393,21 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
             )
             pxd = PXDGenerator(u.module_info)
 
-            translated_modules[u.fqname] = EntryModule(trans.transformed)
+            translated_modules[u.fqname] = EntryModule(trans.transformed, function_origins=trans.function_origins,
+                                                     entry_domains=trans.entry_domains)
             helper_providers.update(trans.helper_providers)
             object_providers.update(trans.object_providers)
+            if trans.dense_entries:
+                dense_entries[u.module_info.fqname] = trans.dense_entries
+            if trans.formula_entries:
+                formula_entries[u.module_info.fqname] = trans.formula_entries
             u.abs_pxd_path.write_text(pxd.code, encoding="utf-8")
             u.abs_init_path.write_text("from . cimport _mx_classes", encoding="utf-8")
             modules.append(u.rel_src_path)
 
         provider_sources = install_helpers(helper_providers, model_path, object_providers)
         modules.extend(provider_sources)
+        translated_modules = lower_entries(translated_modules, dense_entries, formula_entries, policy)
         cell_sources = {}
         for u in units:
             state = guard_integer_boundaries(
@@ -413,6 +423,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
                      source_modules=tuple(state.syntax for state in translated_modules.values()),
                      cell_sources=cell_sources, providers=provider_sources)
+        report = describe(module_infos)
+        (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')
         (model_path / '_mx_integer_checks.json').write_text(json.dumps(integer_report, indent=2), encoding='utf-8')
 
     if args.translate_only:

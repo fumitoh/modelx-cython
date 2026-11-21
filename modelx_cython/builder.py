@@ -50,6 +50,7 @@ from modelx_cython.typedefs import (
 from modelx_cython.config import TransSpec
 from modelx_cython.tracer import RuntimeCellsInfo, MxCallTraceLogger
 from modelx_cython.parser import ModuleVisitor, LexicalCellsInfo, LexicalRefInfo
+from modelx_cython.cell_entries import DenseAxis
 
 from modelx_cython.consts import (
     FORMULA_PREF,
@@ -440,7 +441,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         which is every cells with parameters that has no type
         information.  Its ``_v_`` attribute is a ``cdef dict``.
         """
-        return (self.has_formula_def and self.has_args()
+        return (self.has_formula_def and self.has_args() and not self.uses_native_numeric_cache
                 and not (self.has_typeinfo() and self.is_arrayable()))
 
     @property
@@ -665,12 +666,144 @@ class CombinedCellsInfo(LexicalCellsInfo):
         size policy and can use signed offsets. This selects storage only.
         """
         assert self.has_args() and self.has_typeinfo()
-        if getattr(self._rt, 'has_negative_args', False):
-            return False      # a negative argument: dictionary cache until commit 2's shifted dense caches
-        if self.is_int_args and self.is_real_value and not self.is_array_returned:
-            return True
-        else:
+        if not (self.has_formula_def and self.is_int_args and self.is_real_value and not self.is_array_returned):
             return False
+        if TransSpec.DENSE_WINDOW in self._spec:
+            return True
+        if getattr(self._rt, 'has_negative_args', False) and not self.has_shifted_cache:
+            return False
+        from . import automatic
+        return not (automatic.enabled(self) or automatic.max_dense_entries_set(self)) or automatic.dense_fits(self)
+
+    @property
+    def has_shifted_cache(self):
+        if not (self.has_typeinfo() and self.has_args() and self.is_int_args
+                and self.is_real_value and not self.is_array_returned
+                and getattr(self._rt, 'has_negative_args', False)):
+            return False
+        if TransSpec.DENSE_WINDOW in self._spec:
+            return self.has_formula_def
+        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
+        count = 1
+        for p, size in zip(self.params, sizes):
+            count *= size - self._axis_lower(p)
+        from .automatic import dense_allowed
+        return dense_allowed(self, count)
+
+    @property
+    def uses_native_numeric_cache(self):
+        from modelx_cython import automatic
+        requested = self._spec.get('native_numeric_cache',
+                                   'numeric_cache_capacity' in self._spec or automatic.enabled(self))
+        if type(requested) is not bool:
+            raise ValueError(f'{self.fqname}: native_numeric_cache must be a boolean')
+        numeric = {'double', 'long long', 'bint'}
+        return (requested and self.has_formula_def and self.has_typeinfo() and self.has_args()
+                and not self.is_arrayable()
+                and not self.is_array_returned and self.get_rettype_expr(c_style=True) in numeric
+                and all(self.get_argtype_expr(p, c_style=True) in numeric for p in self.params))
+
+    @property
+    def cache_offsets(self):
+        return tuple(axis.lower for axis in self.dense_axes)
+
+    def _axis_lower(self, key):
+        """Lower bound of a logical axis: a declared (lower, stop) pair gives lower (R-3-lower; a sampled
+        argument below it replaces it, as a sampled one above a declared stop replaces the stop);
+        otherwise min(0, sampled minimum), as before."""
+        minimums = getattr(self._rt, 'min_args', {})
+        declared = getattr(self.parent, 'declared_lowers', {}).get(tuple(self.params), {})
+        if key not in declared:
+            return minimums.get(key, 0)
+        lower = declared[key]
+        sampled = getattr(self._rt, 'observed_min_args', {}).get(key)
+        if sampled is not None and sampled < lower:
+            reported = self.parent.__dict__.setdefault('_widened_reported', set())
+            if (self.name, key) not in reported:
+                reported.add((self.name, key))
+                stop = dict(zip(self.params, self.parent.cells_arg_sizes.get(tuple(self.params), ()))).get(key)
+                _logger.warning(RANGE_WIDENED.format(
+                    cell=getattr(self, 'model_path', self.fqname), params=', '.join(self.params), key=key, lower=lower, stop=stop,
+                    end='lower', sampled=sampled, used_lower=sampled, used_stop=stop))
+            return sampled
+        return lower
+
+    def _logical_axes(self, sizes):
+        return tuple(DenseAxis(key, self._axis_lower(key), stop,
+                               self.get_argtype_expr(key, c_style=True))
+                     for key, stop in sizes.items())
+
+    @cached_property
+    def dense_logical_axes(self):
+        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
+        return self._logical_axes(dict(zip(self.params, sizes)))
+
+    @property
+    def associative_logical_axes(self):
+        """Only exact signed parameters are bounded associative coordinates."""
+        coordinates = [p for p in self.params if self.get_argtype_expr(p, c_style=True) == CY_INT_T]
+        if not coordinates:
+            return ()
+        signature = tuple(self.params)
+        sizes = (dict(zip(signature, self.parent.cells_arg_sizes[signature]))
+                 if self.is_int_args else self.parent.associative_arg_sizes.get(signature, {}))
+        return self._logical_axes({p: sizes[p] for p in coordinates})
+
+    @cached_property
+    def dense_axes(self):
+        requested = self._spec.get(TransSpec.DENSE_WINDOW)
+        if requested is None:
+            from modelx_cython import automatic
+            if automatic.enabled(self):
+                return automatic.observed_axes(self, self.dense_logical_axes)
+            return self.dense_logical_axes
+        if not (self.has_formula_def and self.has_args() and self.has_typeinfo()
+                and self.is_arrayable()):
+            raise ValueError(f'{self.fqname}: dense_window requires a dense cache')
+        logical = self.dense_logical_axes
+        if not isinstance(requested, (tuple, list)) or len(requested) != len(logical):
+            raise ValueError(f'{self.fqname}: dense_window needs one pair per axis')
+        axes = []
+        for axis, bounds in zip(logical, requested):
+            if not (isinstance(bounds, (tuple, list)) and len(bounds) == 2
+                    and all(type(value) is int for value in bounds)
+                    and axis.lower <= bounds[0] < bounds[1] <= axis.stop):
+                raise ValueError(f'{self.fqname}: invalid dense_window for {axis.key}')
+            axes.append(DenseAxis(axis.key, bounds[0], bounds[1], axis.c_type))
+        return tuple(axes)
+
+    @property
+    def has_dense_spill(self):
+        """Whether the dense array leaves some admitted keys to a spill store."""
+        if self._spec.get(TransSpec.DENSE_WINDOW) is None:
+            from modelx_cython import automatic
+            if not (automatic.enabled(self) and self.has_args() and self.has_typeinfo()
+                    and self.is_arrayable()):
+                return False
+        return self.dense_axes != self.dense_logical_axes
+
+    @property
+    def has_inferred_dense_domain(self):
+        """Whether the logical cache domain comes from the sample."""
+        from modelx_cython import automatic
+        if not automatic.enabled(self):
+            return False
+        self.parent.cells_arg_sizes     # fills declared_axes
+        declared = self.parent.declared_axes.get(tuple(self.params), {})
+        return not all(p in declared for p in self.params)
+
+    def get_readiness_array_decl_expr(self, c_style=False):
+        # Cython pickles unsigned-char arrays as NUL-terminated strings, which
+        # loses zero flags (and can read beyond the array). D110 P2a: 2-byte short
+        # flags halve the flag bytes of every item and keep their full shape through
+        # the standard compiled-class serializer, as bint arrays did. A locked Cell's
+        # flags are read and written atomically (_mx_load_flag / _mx_store_flag on
+        # int-sized fields) and stay bint.
+        if self.is_locked:
+            element = CY_BOOL_T if c_style else f'{CY_MOD}.{CY_BOOL_T}'
+        else:
+            element = 'short' if c_style else f'{CY_MOD}.short'
+        return self.get_array_decl_expr(rettype_expr=element, c_style=c_style)
 
     def get_array_decl_expr(self, rettype_expr="", c_style=False):
         """Return the C array declaration expression for the cache.
@@ -691,8 +824,7 @@ class CombinedCellsInfo(LexicalCellsInfo):
         if not rettype_expr:
             rettype_expr = self.get_rettype_expr(c_style=c_style)
 
-        sizes = self.parent.cells_arg_sizes[tuple(self.params)]
-        return rettype_expr + "".join([f"[{str(i)}]" for i in sizes])
+        return rettype_expr + "".join(f"[{axis.stop - axis.lower}]" for axis in self.dense_axes)
 
 
 class CombinedRefInfo:
