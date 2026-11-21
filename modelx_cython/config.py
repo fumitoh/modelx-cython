@@ -36,6 +36,7 @@ from modelx_cython.consts import (
 class CompilerPolicy:
     """Resolve dependent diagnostic options once, before code generation."""
     automatic_optimizations: bool
+    parallel_workers: int
     dense_bounds_proofs: bool
     dense_miss_binding: bool
     dense_one_axis: bool
@@ -74,6 +75,7 @@ class CompilerPolicy:
         automatic = data.get('automatic_optimizations', True)
         miss = data.get('dense_miss_binding', automatic)
         values = dict(automatic_optimizations=automatic,
+            parallel_workers=data.get('parallel_workers', 1),
             dense_bounds_proofs=data.get('dense_bounds_proofs', automatic),
             dense_miss_binding=miss, dense_one_axis=data.get('dense_one_axis', automatic),
             propagate_exact_receiver=data.get('propagate_exact_receiver', automatic and miss),
@@ -92,6 +94,8 @@ class CompilerPolicy:
                 raise ValueError(f'{name} must be a boolean')
         if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
             raise ValueError('integer_checks must be auto, checked or unchecked')
+        if type(values['parallel_workers']) is not int or values['parallel_workers'] < 1:
+            raise ValueError('parallel_workers must be a positive integer')
         if type(values['native_cache_hits']) is not str or values['native_cache_hits'] not in (
                 'none', 'scalar', 'dense', 'both', 'auto'):
             raise ValueError('native_cache_hits must be none, scalar, dense, both or auto')
@@ -139,6 +143,26 @@ class TransSpec:
       tuple; a single-name key bounds that parameter's axis of every
       cached Cell in scope whose parameter tuple has no tuple entry.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
+    * ``"serial_collect"``: optional experimental scalar collection for an
+      isolated slotted leaf Space. Use ``"reduce"`` for fresh receivers or
+      ``"reuse"`` for one receiver. The collect Space owns policy execution:
+      policies are independent and their live receiver and cache stay inside
+      collect. In reuse mode, Reference bindings are captured at entry.
+    * ``"parallel_collect_reuse"``: with ``"serial_collect": "reuse"``, give
+      each ordered collect chunk its own reusable receiver. The same policy
+      isolation and stable Reference contract applies across workers. Scalar
+      chunk totals merge in domain order unless ``"parallel_collect_order"``
+      says ``"completion"``.
+    * ``"parallel_collect_order"``: ``"domain"`` (default with parallel reuse)
+      or ``"completion"``. Domain order gives reproducible chunk merging at a
+      fixed worker count and requires parallel reuse. It does not imply serial
+      sum equivalence: the four-worker total can differ from the one-worker
+      total in the last bits. Completion order merges each chunk as it finishes.
+    * ``"param_bound_checks"``: dict mapping a sized parameter name to a
+      zero-argument cached Cell of the Space whose value is the policy's
+      need for that parameter (for example ``{"t": "proj_len"}``). The
+      opt-in collect entry checks every policy against the bound before
+      any projection and raises IndexError naming the policy.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
       dict with a ``"size"`` key.  Consulted only when

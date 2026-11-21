@@ -36,6 +36,26 @@ def constructor(cell):
     return f'{TYPE}({primary_capacity(cell) or ""})'
 
 
+def classify_shared_items(modules):
+    """Mark ItemSpace classes reachable through compiled References or child Spaces from a collect."""
+    classes = {cls.fqname: cls for module in modules for cls in module.classes.values()}
+    pending = [cls for cls in classes.values() if cls.name in cls.visitor.collect_cache_classes]
+    visited = {cls.fqname for cls in pending}
+    while pending:
+        cls = pending.pop()
+        parent_module = cls.module.fqname.rpartition('.')[0]
+        child_module = MODULE_PREF + cls.name[len(SPACE_PREF):]
+        targets = {ref.mx_class for ref in cls.refs.values() if ref.mx_class}
+        targets.update(f'{parent_module}.{child_module}.{MX_SPACE_MOD}.{SPACE_PREF}{child}' for child in cls.spaces)
+        for name in targets.intersection(classes):
+            target = classes[name]
+            if target.name in target.visitor.itemspace_classes:
+                target.collect_shared_item = True
+            if name not in visited:
+                visited.add(name)
+                pending.append(target)
+
+
 def exclusively_owned(cell):
     # A collect partitions its own working roots. A Reference to an ItemSpace
     # can instead let several workers reach the same persistent item.

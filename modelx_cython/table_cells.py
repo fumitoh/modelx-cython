@@ -220,7 +220,9 @@ def _statements(text, config):
 
 
 def _reset_lines(cls_info):
-    pass
+    from modelx_cython.serial_collect import _reset_lines as collect_reset
+    for line in collect_reset(cls_info):
+        yield line.replace('root.', 'self.', 1).replace('(root.', '(self.')
 
 
 def rewrite_class(cls_info, node, config, integer_refs):

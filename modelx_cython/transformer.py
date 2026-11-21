@@ -602,6 +602,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._resolver = resolver
         self._cells_kinds = cells_kinds or {}
         self._ref_kinds = ref_kinds or {}
+        self._serial_shapes = serial_shapes or {}
+        self._collect_workers = collect_workers
         self._uses_native_round = False
         self.helper_providers = set()
         cells = [cell for cls in module.classes.values() for cell in cls.cells.values()]
@@ -723,11 +725,16 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # then `base ** k` is an integer exponent, as the same expression written inline is
         local_kinds = formula_local_kinds(node, cells.params, self._resolver, self._cells_kinds,
                                           self._ref_kinds, cls_info.fqname, param_kinds)
+        operand_kind = OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
+                                   cls_info.fqname, {**local_kinds, **param_kinds})
         node = preserve_argument_order(node,
             native_result=cells.get_rettype_expr(c_style=True) in ('double', 'long long', 'bint'),
-            operand_kind=OperandKind(self._resolver, self._cells_kinds, self._ref_kinds,
-                                     cls_info.fqname, {**local_kinds, **param_kinds}),
+            operand_kind=operand_kind,
             cells=cells, providers=self.helper_providers)
+        from modelx_cython import space_results
+        if self._resolver is not None:
+            node, held = space_results.lower(node, cls_info, cells, scope, operand_kind, self._pin_held_item)
+            self._uses_pin_held_item |= held
         # D110 P1: a local bound once to an item of a typed ItemSpace Reference is declared its class
         from modelx_cython.item_locals import type_item_locals
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
@@ -982,6 +989,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self._dense_layouts = {}
         self._next_cold_sum = 0
         self._uses_native_round = False
+        from modelx_cython.scopes import Names
+        self._pin_held_item = Names(self._module_node).reserve('_mx_pin_held_item')
+        self._uses_pin_held_item = False
         return self.wrapper.visit(self)
 
     def leave_Module(self, original_node: Module, updated_node: Module) -> Module:
@@ -991,6 +1001,13 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         # cimports for child spaces
         parent = ".".join(self.module.fqname.split(".")[:-1])
         stmts = []
+        if any(shape.reuse for shape in self._serial_shapes.values()):
+            stmts.append(cst.parse_statement(
+                'from cython.cimports.libc.string import memset as _mx_collect_memset'))
+        if any(leaf.kind == 'dict' for shape in self._serial_shapes.values()
+               for leaf in getattr(shape, 'leaves', ())):
+            stmts.append(cst.parse_statement(
+                'from cython.cimports.libc.stdlib import malloc as _mx_collect_malloc, free as _mx_collect_free'))
         from modelx_cython.helpers import module_name
         from modelx_cython.exceptions import NumericExceptions
         if self._uses_native_round:
@@ -1030,6 +1047,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         if self._cold_sums or self._cold_spills or self._held_arrays:
             module = module.with_changes(body=(*module.body, *self._cold_sums, *self._cold_spills,
                                                *(stmt for held in self._held_arrays.values() for stmt in held.body)))
+        if self._uses_pin_held_item:
+            from modelx_cython.space_results import pin_function
+            module = module.with_changes(body=(*module.body, pin_function(self._pin_held_item)))
+        # D116: one root construction and release per compiled ItemSpace class (collect and direct)
+        from modelx_cython import item_roots
+        roots = [fn for name in sorted(self.module.visitor.itemspace_classes) if name in self.module.classes
+                 for fn in item_roots.functions(
+                     name, {} if self.module.classes[name].collect_shared_item
+                     else getattr(self.module.classes[name], 'native_contexts', {}))]
+        if roots:
+            module = module.with_changes(body=(*module.body, *roots))
         directives = []
         if any(getattr(cell, 'power_memo', None) for cls in self.module.classes.values()
                for cell in cls.cells.values()):
@@ -1190,6 +1218,11 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 updated_node = updated_node.with_changes(body=updated_node.body.with_changes(body=tuple(body)))
             updated_node = updated_node.with_changes(body=updated_node.body.with_changes(
                 body=code_enums.bind_properties(self.module.classes[cls_name], updated_node.body.body)))
+            if self._collect_workers is not None:
+                from modelx_cython.serial_collect import add_methods
+                updated_node = add_methods(
+                    self.module.classes[cls_name], updated_node, self._serial_shapes.get(cls_name),
+                    workers=self._collect_workers)
             decorator = cst.Decorator(
                 decorator=cst.Attribute(value=cst.Name(CY_MOD), attr=cst.Name("cclass"))
             )
@@ -1244,7 +1277,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         ):
             attr = original_node.body[0].targets[0].target.attr.value
             cls_info = self.module.classes.get(clsdef.name.value)
-            if (cls_info is not None and cls_info.is_locked
+            if (cls_info is not None and (cls_info.is_locked or cls_info.collect_shared_item)
                     and attr[: len(VAR_PREF)] == VAR_PREF):
                 cells = cls_info.cells.get(attr[len(VAR_PREF):])
                 if cells is not None and cells.uses_dict_cache:
@@ -1499,12 +1532,17 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             elif meth_name == "__call__":
                 # Special methods
                 cells = cls_info.cells[meth_name]
+                if cls_name in self.module.visitor.itemspace_classes:
+                    updated_node = _fast_item_call(updated_node, cls_name)
 
                 if cells and cells.has_typeinfo() and cells.has_args():
                     parameters = self._add_param_type_hints(
                         updated_node, cls_name=cls_name
                     )
                     return updated_node.with_changes(params=parameters)
+
+            elif meth_name == "__delitem__" and cls_name in self.module.visitor.itemspace_classes:
+                updated_node = _releasing_delitem(updated_node, cls_name)
 
             elif meth_name[:2] == "__":
                 # Special methods
@@ -1663,9 +1701,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     elif cells.uses_vector_cache:
                         body = vectors.cache_body(cells)
                     else:
-                        if cells.is_locked:
-                            # the exported body is already double-checked
-                            # and the dict is created in __init__
+                        if cells.is_locked or cls_info.collect_shared_item:
+                            # __init__ installs the dict before any worker can read it.
                             body = updated_node.body
                         else:
                             body = self._add_dict_assign(meth_name, updated_node)
@@ -1836,3 +1873,121 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             updated_node.body, cst.IndentedBlock
         ).with_changes(body=(init_stmt,) + updated_node.body.body)
 
+
+
+def _releasing_delitem(node, cls_name):
+    """D114 item 4: deleting an item also breaks the item's references to itself.
+
+    The exported ``__delitem__`` is ``del self._mx_itemspaces[item]``. An item holds itself in
+    ``_space`` and ``_mx_roots``, so without this it is freed only by the cyclic GC. The removed item,
+    when it is a compiled item without child Spaces or items of its own, is cleared as collect clears
+    its reused root (``_mx_cells``, ``_mx_roots``, ``_space``) by ``item_roots.release_item``, which the
+    whole-model clear shares; it is then freed by its reference count.
+    Any other body is left as exported. The KeyError for a missing key is unchanged (``dict.pop``).
+    """
+    body = node.body.body
+    params = node.params.params
+    if len(body) != 1 or len(params) != 2 or not isinstance(body[0], cst.SimpleStatementLine):
+        return node
+    stmt = body[0].body[0] if len(body[0].body) == 1 else None
+    key = params[1].name.value
+    expected = cst.parse_statement(f"del {MX_SELF}._mx_itemspaces[{key}]\n").body[0]
+    if stmt is None or not stmt.deep_equals(expected):
+        return node
+    source = f"{item_roots.release_item(cls_name)}({MX_SELF}._mx_itemspaces.pop({key}))\n"
+    return node.with_changes(body=node.body.with_changes(body=cst.parse_module(source).body))
+
+
+from modelx_cython import item_roots
+
+
+def _locked_item_build(statements):
+    """Recognize the model-level cold-miss lock added to unlocked Spaces."""
+    if len(statements) != 4:
+        return None
+    key, lookup, hit, locked = statements
+    if (not isinstance(key, cst.SimpleStatementLine) or len(key.body) != 1
+            or not isinstance(key.body[0], cst.Assign) or len(key.body[0].targets) != 1
+            or not same_expression(key.body[0].targets[0].target, cst.Name('_mx_key'))
+            or not isinstance(locked, cst.With) or locked.asynchronous is not None
+            or not isinstance(locked.body, cst.IndentedBlock) or len(locked.items) != 1):
+        return None
+    model_lock = cst.WithItem(cst.parse_expression('self._model._mx_lock'))
+    if not same_expression(locked.items[0], model_lock):
+        return None
+    read = cst.parse_module(
+        '_mx_root = self._mx_itemspaces.get(_mx_key)\n'
+        'if _mx_root is not None:\n'
+        '    return _mx_root\n'
+    ).body
+    if same_expression((lookup, hit), read) and same_expression(locked.body.body[:2], read):
+        return locked
+    return None
+
+
+def _fast_item_call(node, cls_name):
+    """D114 item 6: a new item of a top-level Space without child Spaces is built without the generic walk.
+
+    The exported ``__call__`` walks the new root and its base in step (``zip(_mx_walk(), _mx_walk())``),
+    copies References, applies the roots' and its own parameters and extends ``_mx_roots``. When the
+    receiver is exactly the compiled class and has no child Spaces and no roots, that walk visits the
+    root alone with no roots to apply, so the same statements run once, on a typed root. Any other
+    exported shape is left unchanged.
+    """
+    if not isinstance(node.body, cst.IndentedBlock):
+        return node
+    container = _locked_item_build(node.body.body)
+    prefix = 2 if container is not None else 0
+    if container is None:
+        for stmt in node.body.body:
+            if (isinstance(stmt, cst.If) and isinstance(stmt.orelse, cst.Else)
+                    and isinstance(stmt.test, cst.Comparison)):
+                container = stmt.orelse
+    if container is None or not isinstance(container.body, cst.IndentedBlock):
+        return node
+    block = container.body.body[prefix:]
+
+    def stmt(code):
+        return cst.parse_statement(code + '\n')
+
+    def same(node, code):
+        return same_expression(node, stmt(code))
+
+    def single(node, kind):     # the one small statement of a line, of the given type, or None
+        if isinstance(node, cst.SimpleStatementLine) and len(node.body) == 1 and isinstance(node.body[0], kind):
+            return node.body[0]
+        return None
+
+    store = single(block[3], cst.Assign) if len(block) == 5 else None
+    if (len(block) != 5 or not same(block[0], '_mx_base = self') or not same(block[1], '_mx_root = _mx_base.__class__(self)')
+            or not isinstance(block[2], cst.For) or block[2].asynchronous is not None or block[2].orelse is not None
+            or not isinstance(block[2].body, cst.IndentedBlock)
+            or not same_expression(block[2].target, cst.parse_expression('(_mx_s, _mx_b)'))
+            or not same_expression(block[2].iter, cst.parse_expression('zip(_mx_root._mx_walk(), _mx_base._mx_walk())'))
+            or store is None or not same(block[3], 'self._mx_itemspaces[_mx_key] = _mx_root')
+            or not same(block[4], 'return _mx_root')):
+        return node
+    loop = block[2].body.body
+    params = single(loop[2], cst.Expr) if len(loop) == 5 else None
+    params = params.value if params is not None else None
+    if (len(loop) != 5 or not same(loop[0], '_mx_s._mx_copy_refs(_mx_b, _mx_base)')
+            or not same(loop[1], 'for _mx_r in self._mx_roots:\n    _mx_r._mx_copy_params(_mx_s)')
+            or not isinstance(params, cst.Call) or not params.args
+            or not same_expression(params.func, cst.parse_expression('self._mx_assign_params'))
+            or params.args[0].keyword is not None or params.args[0].star
+            or not same_expression(params.args[0].value, cst.Name('_mx_s'))
+            or not same(loop[3], '_mx_s._mx_roots.extend(self._mx_roots)')
+            or not same(loop[4], '_mx_s._mx_roots.append(_mx_root)')):
+        return node
+    root = '_mx_fast_root'
+    assign = cst.Module(body=(loop[2].with_changes(body=(cst.Expr(params.with_changes(
+        args=(params.args[0].with_changes(value=cst.Name(root)), *params.args[1:]))),)),)).code.strip()
+    store = cst.Module(body=(block[3].with_changes(body=(store.with_changes(value=cst.Name(root)),)),)).code.strip()
+    fast = cst.parse_module(
+        f"if type(self) is {cls_name} and not self._mx_spaces and not self._mx_roots:\n"
+        f"    {root}: {cls_name} = {item_roots.new_root(cls_name)}(self)\n"
+        f"    {assign}\n"
+        f"    {store}\n"
+        f"    return {root}\n").body
+    new_body = container.body.with_changes(body=(*container.body.body[:prefix], *fast, *block))
+    return node.with_changes(body=node.body.deep_replace(container, container.with_changes(body=new_body)))

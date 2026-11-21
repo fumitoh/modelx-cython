@@ -55,6 +55,8 @@ from modelx_cython.entry_pipeline import lower_entries
 from modelx_cython.integer_boundaries import guard_integer_boundaries
 from modelx_cython.helpers import install as install_helpers
 from modelx_cython.build import cell_locations, create_setup
+from modelx_cython.collect_adapter import CollectRuntime
+from modelx_cython.numeric_cache import classify_shared_items
 from modelx_cython.syntax import read_literal
 
 _logger = logging.getLogger(__name__)
@@ -354,6 +356,8 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                 m, source, visitor, module_info,
                 abs_src_path, rel_src_path, abs_pxd_path, abs_init_path))
 
+        classify_shared_items(u.module_info for u in units)
+
         # Phase 2: classify cross-module usage of array-returning cells
         # so that get_rettype_expr can fall back to object where needed.
         pairs = [(u.visitor, u.module_info) for u in units]
@@ -389,17 +393,27 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
         policy = spec.policy
 
         # Phase 3: transform and write out
+        from modelx_cython import serial_collect
+
+        runtime_path = model_path / (MX_SYS_MOD + '.py')
+        runtime = CollectRuntime(runtime_path.read_text(encoding='utf-8'))
+        runtime.require_current((u.module_info for u in units), policy.parallel_workers)
+
         helper_providers = set()
         object_providers = {}
         dense_entries = {}
         formula_entries = {}
         translated_modules = {}
         for u in units:
+            serial_shapes = (serial_collect.analyze(u.module_info, evaluator_args=runtime.evaluator_args)
+                             if runtime.hook else {})
             trans = ModuleTransformer(
                 u.source, u.module_info,
                 resolver=resolver,
                 cells_kinds=cells_kinds,
                 ref_kinds=ref_kinds,
+                serial_shapes=serial_shapes,
+                collect_workers=policy.parallel_workers if runtime.hook else None,
             )
             pxd = PXDGenerator(u.module_info)
 
@@ -438,7 +452,7 @@ def main_handler(args: argparse.Namespace, stdout: IO[str], stderr: IO[str]) -> 
                                       encoding='utf-8')
             cell_sources[u.rel_src_path.as_posix()] = cell_locations(state, u.module_info)
         create_setup(model_name, modules=modules, setup_file=setup_file, source_root=work_dir,
-                     source_modules=tuple(state.syntax for state in translated_modules.values()),
+                     source_modules=(runtime.syntax, *(state.syntax for state in translated_modules.values())),
                      cell_sources=cell_sources, providers=provider_sources)
         report = describe(module_infos)
         (model_path / '_mx_admission.json').write_text(json.dumps(report, indent=2), encoding='utf-8')

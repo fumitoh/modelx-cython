@@ -52,6 +52,12 @@ The sample script must run the model in a single thread: the tracer that
 collects the types of the cells is installed for the thread that runs the
 script only.
 
+Some native table reads use a cached value from another Space. The compiler
+admits those reads when the source Space was exported locked. For resolved
+cached reads and supported bounded and grouped lookups, `_mx_admission.json`
+names the source Cell when its unlocked Space prevents the native read. The
+compiled package evaluates that lookup through the ordinary Cell path.
+
 ## Running the compiled model from threads
 
 ```python
@@ -96,6 +102,11 @@ own attribute and dict accesses.  In the compiled model the attributes of
 a Space are C struct fields whose reference counting is not synchronized,
 so an unlocked Space shared between threads can corrupt memory.  Lock
 every Space that several threads call.
+
+A compiled model has no clear, as upstream modelx-cython: to run with other
+inputs, bind them on a new model instance.  Assigning a Reference while
+other threads evaluate the model is not synchronized; bind the inputs
+before the run starts.
 
 ## How locked Spaces are translated
 

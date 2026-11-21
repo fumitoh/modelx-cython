@@ -689,6 +689,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
         size policy and can use signed offsets. This selects storage only.
         """
         assert self.has_args() and self.has_typeinfo()
+        if getattr(self.parent, 'collect_shared_item', False) and not self.is_locked:
+            return False
         if not (self.has_formula_def and self.is_int_args and self.is_real_value and not self.is_array_returned):
             return False
         if TransSpec.DENSE_WINDOW in self._spec:
@@ -1005,8 +1007,7 @@ class ClassInfo:
     refs:   dict  # name -> CombinedRefInfo
     spaces: list
     params: dict  # name -> CombinedRefInfo
-    _cells_max_args: Dict[Tuple[str], Tuple[int]]
-    _max_arg_cells: Dict[Tuple[str], Dict[str, str]]  # {(arg,) : {arg: fqname}}
+    collect_shared_item = False
 
     def __init__(self, name, module):
         """Build the cells, space, ref and parameter tables for the
