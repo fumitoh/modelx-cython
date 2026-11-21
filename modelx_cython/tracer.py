@@ -106,6 +106,44 @@ class ReturnTypeInfo:
     value_type: type
     is_array: bool = False
     ndim: int = 0
+    vector_shape: object = None     # vector cells: see vector_shape()
+
+
+def vector_shape(val):
+    """The vector shape of a traced value (vector cells, ``vectors.py``).
+
+    'V' for a list of exact floats, 'I' for a list of exact ints within int64,
+    'E' for an empty list (either), ('T', kinds) for a non-empty tuple of such
+    lists, else None. Keyed on the value only.
+    """
+    if type(val) is list:
+        if not val:
+            return 'E'
+        if all(type(x) is float for x in val):
+            return 'V'
+        if all(type(x) is int and -(1 << 63) <= x < (1 << 63) for x in val):
+            return 'I'
+        return None
+    if type(val) is tuple and val:
+        kinds = tuple(vector_shape(x) if type(x) is list else None for x in val)
+        return ('T', kinds) if None not in kinds else None
+    return None
+
+
+def merge_vector_shapes(a, b):
+    """The shape both traced shapes fit, else None ('E' fits 'V' and 'I')."""
+    if a == b:
+        return a
+    if isinstance(a, tuple) and isinstance(b, tuple):
+        if len(a[1]) != len(b[1]):
+            return None
+        kinds = tuple(merge_vector_shapes(x, y) for x, y in zip(a[1], b[1]))
+        return ('T', kinds) if None not in kinds else None
+    if a == 'E' and b in ('V', 'I'):
+        return b
+    if b == 'E' and a in ('V', 'I'):
+        return a
+    return None
 
 
 class RuntimeCellsInfo:     # TODO: Create base class RuntimeBaseMemberInfo
@@ -414,7 +452,16 @@ class _ReturnTypeMerger:
                 changed = signature not in self._array_formats
                 self._array_formats.add(signature)
         else:
-            tp = ReturnTypeInfo(type(val))
+            tp = ReturnTypeInfo(object if isinstance(val, numbers.Integral)
+                                and not -(1 << 63) <= val < (1 << 63) else type(val),
+                                vector_shape=vector_shape(val))
+            if self._integral_double_exact and isinstance(val, numbers.Integral):
+                try:
+                    integer = operator.index(val)
+                    self._integral_double_exact = int(float(integer)) == integer
+                except (TypeError, ValueError, OverflowError):
+                    self._integral_double_exact = False
+                changed = not self._integral_double_exact
 
         last_tp = self.ret_type
         if last_tp is None:
@@ -422,7 +469,14 @@ class _ReturnTypeMerger:
             self._first_args = tr.arg_vals
             return True
         if last_tp == tp:
-            return False
+            return changed
+        if (last_tp.value_type is tp.value_type and not tp.is_array and not last_tp.is_array
+                and last_tp.vector_shape != tp.vector_shape):
+            shape = merge_vector_shapes(last_tp.vector_shape, tp.vector_shape)
+            if shape == last_tp.vector_shape:
+                return changed
+            last_tp.vector_shape = shape
+            return True
 
         before = (last_tp.value_type, last_tp.is_array, last_tp.ndim)
         logged = False

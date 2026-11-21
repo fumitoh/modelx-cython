@@ -165,7 +165,7 @@ def vector_cells(cls_info):
     for name, cells in cls_info.cells.items():
         if cells.is_special() or cells.formula_is_generator or not cells.has_typeinfo():
             continue        # a keyword call or a closure keeps its entry: its public method forwards (D154)
-        shape = getattr(cells, 'vector_shape', None)
+        shape = cells.vector_shape
         if shape in ('V', 'I') or (isinstance(shape, tuple) and shape and shape[0] == 'T'):
             result[name] = shape
     return result
@@ -417,7 +417,12 @@ class RenameMembers(cst.CSTTransformer):
                     if cls:
                         types_[small.targets[0].target.value] = cls
         self._locals.append(types_)
-        self._vector_locals.append(set())
+        from modelx_cython.vectors import TYPES
+        vector_types = set(TYPES.values())
+        self._vector_locals.append({small.target.value for line in lines
+            if isinstance(line, (cst.SimpleStatementLine, cst.SimpleStatementSuite)) for small in line.body
+            if isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name)
+            and cst.Module(body=[]).code_for_node(small.annotation.annotation) in vector_types})
         self._functions.append(node)
 
     def leave_FunctionDef(self, original, updated):
@@ -429,6 +434,7 @@ class RenameMembers(cst.CSTTransformer):
     # ---------------------------------------------------------------- D154: vector results
     def _vector_return(self, shape):
         """Whether the enclosing function returns the typed vector (or tuple of them) of ``shape``."""
+        from modelx_cython.vectors import TYPES
         if not self._functions or self._functions[-1].returns is None:
             return False
         function = self._functions[-1]
@@ -440,6 +446,7 @@ class RenameMembers(cst.CSTTransformer):
                 if name.startswith(prefix) and own.get(name[len(prefix):]) == shape:
                     return True
             return False
+        return annotation == TYPES.get(shape)
 
     def _vector_targets(self, targets):
         names = self._vector_locals[-1] if self._vector_locals else set()
@@ -458,11 +465,14 @@ class RenameMembers(cst.CSTTransformer):
         typed vector local assigned from it, the return of a function typed to return it, and the elements of
         a tuple of vectors so used. Everywhere else the call stays on the public method, which returns a new
         list: the value Python code sees there is the list live builds, whatever the receiver."""
+        from modelx_cython.vectors import ALIAS
         parent = self._parent(node)
         if isinstance(parent, cst.Attribute) and parent.value is node:
             return parent.attr.value in ('n', 'data', 'tolist')
         if isinstance(parent, cst.Arg):
             call = self._parent(parent)
+            return (isinstance(call, cst.Call) and isinstance(call.func, cst.Attribute)
+                    and isinstance(call.func.value, cst.Name) and call.func.value.value == ALIAS)
         if isinstance(parent, cst.Comparison) and parent.left is node:
             return all(isinstance(c.operator, (cst.Is, cst.IsNot)) and isinstance(c.comparator, cst.Name)
                        and c.comparator.value == 'None' for c in parent.comparisons)

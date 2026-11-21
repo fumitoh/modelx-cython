@@ -32,6 +32,8 @@ def describe(module_infos):
                     cache = 'dense'
                 elif cell.uses_native_numeric_cache:
                     cache = 'native-numeric-keys'
+                elif cell.uses_vector_cache:
+                    cache = 'vector-dense'
                 else:
                     cache = 'dictionary'
                 reasons = []
@@ -238,12 +240,18 @@ def cache_detail(cell, cache):
             detail.update(window=window, entries=count, bytes=count * 12)
             return detail
         if cache == 'vector-dense':
+            from .vectors import vector_cache_plan
+            axes, count, size = vector_cache_plan(cell.parent)[0][cell.name]
+            detail.update(window=_window(axes)[0], entries=count, bytes=size)
             return detail
         if cache not in ('native-numeric-keys', 'dictionary'):
             return detail
         from .automatic import max_dense_entries
         limit = max_dense_entries(cell)
-        if cache == 'dictionary':
+        vector_refused = (vector_refusal(cell) if cache == 'dictionary' else None)
+        if vector_refused:
+            detail['hash_reason'] = vector_refused
+        elif cache == 'dictionary':
             detail['hash_reason'] = ('return or parameter types are not native numbers'
                                      if cell.has_typeinfo() else 'formula not observed by the sample')
         elif not cell.is_int_args:
@@ -259,6 +267,17 @@ def cache_detail(cell, cache):
     return detail
 
 
+def vector_refusal(cell):
+    """Why a vector cell with parameters is not on a VecCache (budget or window), else None."""
+    if not getattr(cell, 'vector_shape', None) or getattr(cell, 'parent', None) is None:
+        return None
+    try:
+        from .vectors import vector_cache_plan
+        return vector_cache_plan(cell.parent)[1].get(cell.name)
+    except Exception:       # a class info without cells: no plan
+        return None
+
+
 def slow_paths(cell, cache):
     """diag-jp: work of a compiled formula that still runs on Python objects or a slow cache,
     which the other report keys do not flag as such: a cell with parameters on a hash or
@@ -270,7 +289,12 @@ def slow_paths(cell, cache):
     entries = []
     if per_step and cache in ('native-numeric-keys', 'dictionary'):
         detail = f'{cache} cache'
+        refused = vector_refusal(cell) if cache == 'dictionary' else None
+        if refused:
+            detail += f': {refused}'
         try:
+            if refused:
+                raise LookupError(refused)
             from .automatic import max_dense_entries
             limit = max_dense_entries(cell)
             axes = list(getattr(cell, 'associative_logical_axes', ()) or ())

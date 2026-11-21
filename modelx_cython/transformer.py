@@ -62,6 +62,7 @@ import libcst.matchers as m
 from libcst.metadata import ParentNodeProvider, ScopeProvider, GlobalScope, ClassScope
 from libcst.metadata.scope_provider import BuiltinAssignment
 
+from modelx_cython import vectors
 from modelx_cython.parser import ParentScopeAddin
 from modelx_cython.builder import ModuleInfo, CombinedCellsInfo
 from modelx_cython.config import TransSpec
@@ -202,7 +203,8 @@ class PXDGenerator:
         """
         stmts = []
         from modelx_cython.helpers import module_name
-        for provider in sorted(numeric_cache.providers(self.module)):
+        from modelx_cython import vectors
+        for provider in sorted(numeric_cache.providers(self.module) | vectors.providers(self.module)):
             stmts.append(f'from {self.package} cimport {module_name(provider)}')
         for ci in self.module.cimports:
             stmts.append(f"cimport {ci}")
@@ -351,6 +353,8 @@ class PXDGenerator:
 
                 elif cells.uses_native_numeric_cache:
                     decl_stmts.append(f'cdef {numeric_cache.storage(cells)} {VAR_PREF + cells.name}\n')
+                elif cells.uses_vector_cache:
+                    decl_stmts.append(f'cdef {vectors.CACHE_TYPE} {VAR_PREF + cells.name}\n')
                 else:
                     decl_stmts.append(f"cdef dict {VAR_PREF + cells.name}\n")
             else:
@@ -609,6 +613,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         self.function_origins = {}      # D139: {private entry of an uncached Cell: (class, Cell)}
         self.entry_domains = {}         # D139b: {private entry of an uncached Cell: its argument domain}
         self.helper_providers.update(numeric_cache.providers(module))
+        from modelx_cython import vectors
+        self.helper_providers.update(vectors.providers(module))
+        self._vector_counter = [0]
         code_enums.prepare(module)
 
     def _compact_spill(self, cells, cls_name, source):
@@ -631,12 +638,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         when no operand pair can be typed.
         """
         from modelx_cython.checked_arithmetic import CheckedArithmetic
-        from modelx_cython import held_arrays
+        from modelx_cython import vectors, held_arrays
         builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
+        node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
+                             self._ref_kinds.get(cls_info.fqname, {}))
         node = self._table_reads_with_row_fields(node, cls_info, cells, 'int' in builtin_keys)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
@@ -1013,6 +1022,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                     elif cells.uses_native_numeric_cache:
                         decl_stmts.append(cst.parse_statement(
                             f'{VAR_PREF + cells.name}: {numeric_cache.storage(cells)}\n'))
+                    elif cells.uses_vector_cache:
+                        decl_stmts.append(cst.parse_statement(f'{VAR_PREF + cells.name}: {vectors.CACHE_TYPE}\n'))
                     else:
                         decl_stmts.append(
                             cst.parse_statement(
@@ -1304,8 +1315,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                         initializers.append(cst.parse_statement(
                             f'self._v_{cell.name} = {numeric_cache.constructor(cell)}\n'
                         ))
+                    elif cell.uses_vector_cache:
+                        initializers.append(cst.parse_statement(
+                            f'self._v_{cell.name} = {vectors.cache_constructor(cell)}\n'))
                 return updated_node.with_changes(body=updated_node.body.with_changes(
                     body=(*updated_node.body.body, *initializers)))
+
+            if meth_name in (MX_ASSIGN_REFS, MX_COPY_REFS):
+                updated_node = self._guard_reference_assignments(cls_info, updated_node)
+
             if meth_name[: len(FORMULA_PREF)] == FORMULA_PREF:
                 # _f_ methods
                 cells = cls_info.cells.get(meth_name[len(FORMULA_PREF):])
@@ -1544,6 +1562,8 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                             _logger.warning(warning)
                         if (warning := use_warning(cells)) is not None:
                             _logger.warning(warning)
+                    elif cells.uses_vector_cache:
+                        body = vectors.cache_body(cells)
                     else:
                         if cells.is_locked:
                             # the exported body is already double-checked
