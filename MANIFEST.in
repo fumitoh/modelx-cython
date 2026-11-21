@@ -1,1 +1,4 @@
 include modelx_cython/*.pxd
+include modelx_cython/*.pyx
+recursive-include modelx_cython/runtime *.pxd *.pyx
+include modelx_cython/runtime/LICENSE.lifelib.txt

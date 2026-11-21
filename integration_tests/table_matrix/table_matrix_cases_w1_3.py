@@ -5,9 +5,8 @@ Same contract as table_matrix_cases_w1_2.py; a key present in both files is an e
 Every square is one cell of a single model (one build for all of them): its formula is
 written in the target syntax and evaluated for a few arguments in the mode asked. The oracle
 is the same formula run on the pandas frames (``pd.DataFrame`` in place of each table),
-except where D25a pins a different outcome (``EXPECT``). The compiled build lowers the reads
-(spec ``typed_table_reads``), so its squares need the runtime
-handles of W1.2; until then they fail on the stub handles and stay xfail (not in DONE).
+except where D25a pins a different outcome (``EXPECT``). The compiled model uses
+Python helper reads for these fixtures.
 The squares are the prototype's ``test_loc_reads.py`` forms placed on the matrix; the key
 axis beyond ``int``/``tuple``/``str`` is left to W1.2.
 """
@@ -250,11 +249,13 @@ def _results(mode, tmp_path_factory):
             build = subprocess.run([sys.executable, '-m', 'modelx_cython', 'exported', '--sample', 'sample.py',
                                     '--spec', 'spec.py'], cwd=root, capture_output=True, text=True, env=env)
             assert build.returncode == 0, build.stdout[-3000:] + build.stderr[-3000:]
-            # the derived sub-table cells (R3) return the child handle's bound table (D53),
-            # so the S squares read through it
             generated = '\n'.join(path.read_text(encoding='utf-8')
                                   for path in (root / 'exported_cy').rglob('_mx_classes.py'))
-            assert generated.count('.table_object()') == 2, 'S_F2 and S_R return the child table object'
+            for child, parent in (('S_F2', 'T_F2'), ('S_R', 'T_R')):
+                body = generated.split(f'def _f_{child}(', 1)[1].split('\n\n', 1)[0]
+                assert f'_mx_cell_{parent}()' in body and '.loc[' in body, body
+                entry = generated.split(f'def _mx_cell_{child}(', 1)[1].split('\n\n', 1)[0]
+                assert f'.bind_native_table(self._f_{child}(),' in entry, entry
             package = 'exported_cy'
         script = runner + f'\nfrom {package} import mx_model as m\nprint(json.dumps(run(m.Matrix, {squares!r})))\n'
         done = subprocess.run([sys.executable, '-c', script], cwd=root, capture_output=True, text=True, env=env)
