@@ -19,6 +19,7 @@ cdef enum:
 cdef class PreparedTable:
     cdef object _source                    # weak reference to the user's frame or Series (``source``): a prepared
                                            # copy never keeps a replaced frame alive
+    cdef object _zip_axes                   # exact index and columns admitted at publication
     cdef readonly bint is_series
     cdef readonly Py_ssize_t nrows, nlevels
     cdef readonly tuple level_labels       # per level: its labels in code order (a list)
@@ -324,6 +325,7 @@ cdef inline Py_ssize_t nrows(PreparedRef ref) noexcept nogil:
 cdef object label_obj(PreparedRef ref, Py_ssize_t row, int level)
 cdef long long view_range(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,
                           Py_ssize_t c4) noexcept
+cdef object zip_prepared_prefix(object prepared, object frame, object accessor, object key, Py_ssize_t signature)
 
 
 cdef inline Py_ssize_t range_start(long long packed) noexcept nogil:

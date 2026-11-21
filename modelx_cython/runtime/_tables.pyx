@@ -15,6 +15,7 @@ inline methods of the .pxd.
 from libc.math cimport isnan
 
 import threading
+from types import MethodType
 import weakref
 
 import numpy as np
@@ -23,6 +24,11 @@ import pandas as pd
 cdef Py_ssize_t _GRID_LIMIT = 65536
 cdef long long _COMBINED_LIMIT = 1LL << 62
 cdef int _MAX_LEVELS = 8
+cdef object _zip_loc = pd.DataFrame.loc
+cdef object _zip_accessor_type = type(pd.DataFrame().loc)
+cdef object _zip_accessor_getitem = _zip_accessor_type.__getitem__
+cdef object _zip_frame_getitem = pd.DataFrame.__getitem__
+cdef object _zip_xs = pd.DataFrame.xs
 
 
 cdef extern from "Python.h":
@@ -513,6 +519,27 @@ cdef object bind_own(object frame):
     return table
 
 
+cdef Py_ssize_t _zip_slot(PreparedTable table, object label):
+    """Admit the narrow ordered ZIP shape at the original Data Cell's bind."""
+    frame = table._source()
+    if (type(frame) is not pd.DataFrame or table.nlevels != 2 or not table.ordered_within[1]
+            or pd.DataFrame.loc is not _zip_loc or pd.DataFrame.__getitem__ is not _zip_frame_getitem
+            or pd.DataFrame.xs is not _zip_xs):
+        return -1
+    index, columns = frame.index, frame.columns
+    if (type(index) is not pd.MultiIndex or type(columns) is not pd.Index
+            or type(index.levels[0]) is not pd.Index or type(index.levels[1]) is not pd.Index
+            or index.levels[1].dtype != np.dtype('int64')
+            or any(type(key) is not str for key in table.level_labels[0])
+            or any(type(name) is not str for name in columns)):
+        return -1
+    cdef Py_ssize_t position = table.column_positions.get(label, -1)
+    if position < 0 or table.column_kind[position] != COLUMN_F64:
+        return -1
+    table._zip_axes = index, columns
+    return table.column_slot[position] + 1
+
+
 cdef void _decide(PreparedTable table):
     """T-4.2: decide, once per prepared table, the slot of every read signature of the model:
     (levels, columns, label, kind) ->
@@ -523,7 +550,8 @@ cdef void _decide(PreparedTable table):
     - ``label``, ``kind``: the column read and its block kind (-1: index membership; -2: extremes of a non-empty
       index; -3: a walk of the index in pandas order: the table ordered within every prefix of ``label`` levels
       (0 or None: the whole table); -4: a row read by field, ``columns`` given;
-      -5: ``T.loc[a, b]`` read as a row prefix, no label of level ``label`` (b's) being a column label).
+      -5: ``T.loc[a, b]`` read as a row prefix, no label of level ``label`` (b's) being a column label;
+      -7: a ZIP over an ordered string/int64 prefix and a float64 column).
     The slot is one plus the column's slot in its block (1 for a read of the index), or -1."""
     cdef int level
     cdef Py_ssize_t position
@@ -546,7 +574,9 @@ cdef void _decide(PreparedTable table):
                         break
         value = -1
         if result:
-            if kind == -6:      # T-5: level label[1] is named label[0] and is an int level (get_level_values)
+            if kind == -7:
+                value = _zip_slot(table, label)
+            elif kind == -6:      # T-5: level label[1] is named label[0] and is an int level (get_level_values)
                 value = 1 if (label[1] < table.nlevels and (label[0] is None or table.level_names[label[1]] == label[0])
                               and table.level_kind[label[1]] != LEVEL_OBJECT and table.nrows > 0) else -1
             elif kind == -5:      # T-5: `T.loc[a, b]` is a row prefix: no label of level `label` is a column label
@@ -702,6 +732,40 @@ cdef long long view_range(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t 
     if not (<PreparedTable>ref).prefix_range(codes, count, &start, &stop):
         return -1
     return (<long long>start << 32) | <long long>stop
+
+
+cdef object zip_prepared_prefix(object prepared, object frame, object accessor, object key, Py_ssize_t signature):
+    """Read a freshly boxed list from the already published ordered snapshot, or decline."""
+    cdef PreparedTable table
+    cdef PreparedRef ref
+    cdef Py_ssize_t column, row, start, stop
+    cdef long long bounds
+    if type(prepared) is not PreparedTable or type(key) is not str:
+        return None
+    table = <PreparedTable>prepared
+    ref = <PreparedRef>table
+    column = slot(ref, signature)
+    if column <= 0 or table._source() is not frame:
+        return None
+    index, columns = table._zip_axes
+    if (frame.index is not index or frame.columns is not columns or type(accessor) is not _zip_accessor_type
+            or _zip_accessor_type.__getitem__ is not _zip_accessor_getitem or pd.DataFrame.loc is not _zip_loc
+            or pd.DataFrame.__getitem__ is not _zip_frame_getitem or pd.DataFrame.xs is not _zip_xs):
+        return None
+    xs = frame.xs
+    if type(xs) is not MethodType or xs.__func__ is not _zip_xs:
+        return None
+    attrs = frame.attrs
+    if type(attrs) is not dict or attrs:
+        return None
+    bounds = view_range(ref, 1, ocode(ref, 0, key), 0, 0, 0, 0)
+    if bounds < 0:
+        return None
+    start, stop = range_start(bounds), range_stop(bounds)
+    cdef list pairs = []
+    for row in range(start, stop):
+        pairs.append((label_ll(ref, row, 1), f64_row(ref, column, row + 1)))
+    return pairs
 
 
 cdef Py_ssize_t view_start(PreparedRef ref, int count, Py_ssize_t c0, Py_ssize_t c1, Py_ssize_t c2, Py_ssize_t c3,

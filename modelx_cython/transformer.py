@@ -650,14 +650,15 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         from modelx_cython.checked_arithmetic import CheckedArithmetic
         from modelx_cython.rounding import RoundedInputs
         from modelx_cython import vectors, held_arrays
-        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range")
+        builtin_keys = {name for name in ("all", "any", "sum", "min", "max", "float", "int", "round", "range",
+                                         "zip", "str", "type")
                         if scope[name] and all(isinstance(binding, BuiltinAssignment)
                                                for binding in scope[name])}
         # a typed-memoryview Cell read by subscript is held per item (no slice copy per evaluation)
         node = held_arrays.lower(node, cls_info, cells, self._held_arrays)
         node = vectors.lower(node, cls_info, cells, scope, self._vector_counter, self.module,
                              self._ref_kinds.get(cls_info.fqname, {}))
-        node = self._table_reads_with_row_fields(node, cls_info, cells, 'int' in builtin_keys)
+        node = self._table_reads_with_row_fields(node, cls_info, cells, builtin_keys)
         cells.formula_allows_exact_receiver = allows_exact_receiver(node, cls_info.name)
         node = CheckedArithmetic(cls_info, cells, builtin_keys).rewrite(node)
         if not self.module.spec.policy.native_math:
@@ -740,9 +741,9 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         node, cells.typed_item_locals = type_item_locals(node, cls_info, self.module)
         return node
 
-    def _table_reads(self, node, cls_info, cells, builtin_int):
+    def _table_reads(self, node, cls_info, cells, builtin_keys):
         """Lower and report table reads before the remaining formula transforms."""
-        return self._table_reads_lowered(node, cls_info, cells, builtin_int)
+        return self._table_reads_lowered(node, cls_info, cells, builtin_keys)
 
     def _row_cells(self, cls_info):
         """diag-run8 F3: the row cells of the class whose every use is a field read
@@ -838,7 +839,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
         cached = getattr(self._resolver, 'cached_cells', ())
         return name is not None and any(str(c).endswith('._f_' + name) for c in cached)
 
-    def _table_reads_with_row_fields(self, node, cls_info, cells, builtin_int):
+    def _table_reads_with_row_fields(self, node, cls_info, cells, builtin_keys):
         """diag-run8 F3: a formula reading fields of accepted row cells is lowered with each
         ``self.R()`` replaced by the cell's row expression; when a replaced read is not lowered to a
         native row read, the formula is lowered as written instead (its reads keep the Record)."""
@@ -852,14 +853,14 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                 code_of = cst.Module(body=[]).code_for_node
                 self._row_names = {code_of(expr): name for name, expr in rows.items()}
                 try:
-                    lowered = self._table_reads(candidate, cls_info, cells, builtin_int)
+                    lowered = self._table_reads(candidate, cls_info, cells, builtin_keys)
                 finally:
                     self._row_names = None
                 # Every inlined field read must be an L2 read of a row held per item.
                 if sum(1 for e in getattr(cells, 'frame_reads', ()) if e['form'] == 'L2') >= inline.count:
                     cells.row_fields_inlined = inline.count
                     return lowered
-        return self._table_reads(node, cls_info, cells, builtin_int)
+        return self._table_reads(node, cls_info, cells, builtin_keys)
 
     def _lower_frames(self, frames, node, cls_info, cells):
         """T-5c: ``frames.lower(node)``; an internal error leaves the formula as written (every read on pandas): the
@@ -881,6 +882,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             frames.lowered_nodes.clear()
             frames.lowered_text.clear()
             frames.param_readers.clear()
+            frames.held_string_selector = None
             frames.declined = [{'expression': cells.name, 'receiver': '', 'form': 'pandas',
                                 'reason': f'declined after internal error: {type(error).__name__}: {error}'}]
             import logging
@@ -888,7 +890,7 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
                                                 cells.name, type(error).__name__, error)
             return node
 
-    def _table_reads_lowered(self, node, cls_info, cells, builtin_int):
+    def _table_reads_lowered(self, node, cls_info, cells, builtin_keys):
         cells.table_reads_typed, cells.table_reads_untyped, cells.table_reads_keys = 0, [], []
         if self._resolver is None:
             return node
@@ -897,8 +899,10 @@ class ModuleTransformer(m.MatcherDecoratableTransformer, ParentScopeAddin):
             from modelx_cython.frame_reads import FrameReads
             frames = FrameReads(self._resolver, cls_info, cells, self.helper_providers, self.module.spec.policy,
                                 getattr(self, '_row_names', None), self._prefix_cells(cls_info),
-                                self._param_prefix_cells(cls_info), builtin_int=builtin_int)
+                                self._param_prefix_cells(cls_info), builtin_int='int' in builtin_keys,
+                                builtin_zip_walk={'zip', 'int', 'float', 'str', 'type'} <= builtin_keys)
             node = self._lower_frames(frames, node, cls_info, cells)
+            cells.held_string_selector = frames.held_string_selector
             cells.frame_reads = frames.lowered + frames.declined
             # T-5: the pandas fallback of a lowered read runs only when the table cannot answer: not a pandas read
             from modelx_cython.frame_reads import without_fallbacks

@@ -117,13 +117,14 @@ class FrameReads:
     (one dict per read) and ``declined`` why a read of a frame receiver was not."""
 
     def __init__(self, resolver, cls_info, cells, providers, policy, row_names=None, prefix_cells=None,
-                 param_cells=None, *, builtin_int):
+                 param_cells=None, *, builtin_int, builtin_zip_walk=False):
         self.param_cells = param_cells or {}    # T-5c: cell with parameters -> (names, its `T.loc[key]` expression)
         self.row_names = row_names or {}       # code of an inlined row expression -> its row cell (assignments)
         self.prefix_cells = prefix_cells or {}  # zero-argument cell of the class -> its `T.loc[key]` expression
         self.resolver, self.cls_info, self.cells = resolver, cls_info, cells
         self.providers, self.policy = providers, policy
         self.builtin_int = builtin_int
+        self.builtin_zip_walk = builtin_zip_walk
         self.lowered, self.declined = [], []
         self.lowered_nodes = []     # original nodes, including their nested operations
         # what the sample run saw at each table read of this formula, by the text of the node (read_notes.py)
@@ -131,6 +132,7 @@ class FrameReads:
         self.lowered_text = set()   # texts of the nodes this formula's rewrite replaced
         self.param_readers = set()  # names of parameterised prefix Cells replaced by a native read
         self.key_count = 0
+        self.held_string_selector = None
 
     def note_of(self, node):
         return self.notes.get(normal(_code(node)))
@@ -407,6 +409,11 @@ class FrameReads:
         self.declarations = []  # T-5: C Py_ssize_t locals of the formula (loop positions)
         self.local_count = 0
         rewriter = _Rewrite(self)
+        if self.builtin_zip_walk and not getattr(self.policy, 'verify_inputs', False):
+            zipped = rewriter.zip_prefix(node.body.body)
+            if zipped is not None:
+                self.providers.add(PROVIDER)
+                return node.with_changes(body=node.body.with_changes(body=zipped))
         body = []
         changed = False
         for statement in node.body.body:
@@ -452,7 +459,18 @@ class FrameReads:
             head = 1 if body and _is_docstring(body[0]) else 0
             body[head:head] = [cst.parse_statement(f'{name}: _mx_cy.Py_ssize_t') for name in self.declarations]
         self.providers.add(PROVIDER)
-        return node.with_changes(body=node.body.with_changes(body=self._flatten(body)))
+        lowered = self._flatten(body)
+        from .key_facts import _is_docstring
+        original = [s for s in node.body.body if not _is_docstring(s)]
+        if (rewriter.held_string_read is not None and len(original) == 1
+                and isinstance(original[0], cst.SimpleStatementLine) and len(original[0].body) == 1
+                and isinstance(original[0].body[0], cst.Return)
+                and isinstance(lowered[-1], cst.SimpleStatementLine) and isinstance(lowered[-1].body[0], cst.Return)):
+            read, test, state = rewriter.held_string_read
+            expr = lowered[-1].body[0].value
+            if isinstance(expr, cst.IfExp) and expr.body.deep_equals(read) and expr.test.deep_equals(test):
+                self.held_string_selector = f'self.{state} > 0 and ({_code(test)})'
+        return node.with_changes(body=node.body.with_changes(body=lowered))
 
     def _asof_assignment(self, statement):
         assign = self._simple_assign(statement)
@@ -802,6 +820,14 @@ class FrameReads:
         """T-4.2: ``X._mx_prepared_<name>()`` when the receiver ``X.<name>()`` is a frame cell of a class without
         items in this module, which publishes its prepared table (one field read per item, as main's held handle);
         else None (the binding prepares or looks the frame up)."""
+        provider = self.published_provider(receiver)
+        if provider is not None:
+            _, name = provider
+            return f'{_code(receiver.func.value)}._mx_prepared_{name}()'
+        return None
+
+    def published_provider(self, receiver):
+        """The same-module Data class and Cell that publish this frame."""
         if not (isinstance(receiver, cst.Call) and not receiver.args and isinstance(receiver.func, cst.Attribute)):
             return None
         from .usage import RESOLVED, _extract_self_chain
@@ -815,7 +841,7 @@ class FrameReads:
         for owner in self.cls_info.module.classes.values():
             for name, cells in owner.cells.items():
                 if cells.fqname == fqname and name in data_frame_cells(owner):
-                    return f'{_code(receiver.func.value)}._mx_prepared_{name}()'
+                    return owner, name
         return None
 
     def read_signature(self, hold):
@@ -1096,7 +1122,8 @@ def without_fallbacks(node):
             return updated
 
         def leave_If(self, original, updated):       # a lowered loop and its pandas copy
-            if f'{module}.slot(' in _code(original.test) and updated.orelse is not None:
+            test = _code(original.test)
+            if (f'{module}.slot(' in test or f'{module}.zip_prepared_prefix(' in test) and updated.orelse is not None:
                 return updated.with_changes(orelse=None)
             return updated
     return node.visit(Strip())
@@ -1184,6 +1211,7 @@ class _Rewrite(cst.CSTTransformer):
         self.taken = []         # T-5c: kinds of the holds taken since the last recorded read (its run-time fallbacks)
         self.generator_walks = set()    # T-5c: ids of lowered generator walks (``gen if test else pandas gen``)
         self.updated_of = {}    # id(original node) -> its rewritten node (key parts are emitted with their reads lowered)
+        self.held_string_read = None
 
     def on_leave(self, original, updated):
         result = super().on_leave(original, updated)
@@ -1886,6 +1914,114 @@ class _Rewrite(cst.CSTTransformer):
         start, stop, test = self._view_parts(view, hold)
         return view, self._conjunction([test, *extra]), start, stop, lambda row: make(self._row_at(view, hold, row))
 
+    def zip_prefix(self, statements):
+        """Walk a string prefix once for a terminal list of int/float pairs from the same view."""
+        from .key_facts import _is_docstring
+        head = int(bool(statements) and _is_docstring(statements[0]))
+        if len(statements) - head != 2:
+            return None
+        assignment, returned = statements[head:]
+        o = self.o
+        name, subscript = o._simple_assign(assignment) or (None, None)
+        if not (isinstance(subscript, cst.Subscript) and isinstance(subscript.value, cst.Attribute)
+                and subscript.value.attr.value == 'loc' and isinstance(subscript.value.value, cst.Call)
+                and isinstance(returned, cst.SimpleStatementLine) and len(returned.body) == 1
+                and isinstance(returned.body[0], cst.Return) and isinstance(returned.body[0].value, cst.ListComp)):
+            return None
+        comp = returned.body[0].value
+        walk, pair = comp.for_in, comp.elt
+        if not (isinstance(pair, cst.Tuple) and len(pair.elements) == 2 and walk.asynchronous is None
+                and not walk.ifs and walk.inner_for_in is None and isinstance(walk.target, cst.Tuple)
+                and len(walk.target.elements) == 2 and isinstance(walk.iter, cst.Call)
+                and isinstance(walk.iter.func, cst.Name) and walk.iter.func.value == 'zip'
+                and len(walk.iter.args) == 2 and all(not arg.star and arg.keyword is None for arg in walk.iter.args)
+                and name not in ('zip', 'int', 'float') and o._once(name)):
+            return None
+        names = []
+        for target, output, convert in zip(walk.target.elements, pair.elements, ('int', 'float')):
+            if not (isinstance(target, cst.Element) and isinstance(target.value, cst.Name)
+                    and isinstance(output, cst.Element) and isinstance(output.value, cst.Call)
+                    and isinstance(output.value.func, cst.Name) and output.value.func.value == convert
+                    and len(output.value.args) == 1):
+                return None
+            arg = output.value.args[0]
+            if (arg.star or arg.keyword is not None or not isinstance(arg.value, cst.Name)
+                    or arg.value.value != target.value.value):
+                return None
+            names.append(target.value.value)
+        if names[0] == names[1] or set(names) & {name, 'int', 'float'}:
+            return None
+        index, column = (arg.value for arg in walk.iter.args)
+        if not (isinstance(index, cst.Attribute) and index.attr.value == 'index'
+                and isinstance(index.value, cst.Name) and index.value.value == name
+                and isinstance(column, cst.Subscript) and isinstance(column.value, cst.Name)
+                and column.value.value == name):
+            return None
+        labels = _index_parts(column)
+        label = _literal_str(labels[0]) if labels and len(labels) == 1 else None
+        parts = _index_parts(subscript)
+        if (label is None or column.slice[0].comma is not cst.MaybeSentinel.DEFAULT
+                or not parts or len(parts) != 1 or subscript.slice[0].comma is not cst.MaybeSentinel.DEFAULT):
+            return None
+        key = parts[0]
+        if not (o.per_item and isinstance(key, cst.Call) and not key.args and isinstance(key.func, cst.Attribute)
+                and isinstance(key.func.value, cst.Name) and key.func.value.value == 'self'):
+            return None
+        key_name = key.func.attr.value
+        selector = o.cls_info.cells.get(key_name)
+        if (selector is None or not selector.has_formula_def or selector.has_args() or selector.is_locked
+                or selector.get_rettype_expr() != 'str'):
+            return None
+        prefix = o.prefix_of(subscript)
+        if prefix is None:
+            return None
+        (call, schema), _ = prefix
+        provider = o.published_provider(call)
+        owner = call.func.value
+        if not (schema['kind'] == 'frame' and schema['levels'] == ('obj', 'int')
+                and dict(schema['columns']).get(label) == 'f64' and provider is not None
+                and isinstance(owner, cst.Attribute) and isinstance(owner.value, cst.Name)
+                and owner.value.value == 'self'):
+            return None
+        cls, table_name = provider
+        ref = o.cls_info.refs.get(owner.attr.value)
+        if ref is None or ref.get_type_expr() != cls.name or name == cls.name:
+            return None
+
+        occupied = set(o.facts.formula.loads) | set(o.facts.formula.binds) | o.facts._params
+        temps = []
+        while len(temps) < 6:
+            fresh = o.position_name()
+            if fresh not in occupied:
+                temps.append(fresh)
+        data, frame, loc, snapshot, captured_key, result = map(cst.Name, temps)
+        key_safe = f'(self._has_{key_name} and type(self._v_{key_name}) is str)'
+        cold = getattr(selector, 'held_string_selector', None)
+        if cold is not None:
+            key_safe = f'({key_safe} or (not self._has_{key_name} and ({cold})))'
+        guard = f'type(self) is {o.cls_info.name} and type({data.value}) is {cls.name} and {key_safe}'
+        receiver = call.with_changes(func=call.func.with_changes(value=data))
+        prefix_lookup = (
+            cst.parse_statement(f'{data.value}: {cls.name} = {_code(owner)}'),
+            self._assign(frame.value, receiver),
+            self._assign(loc.value, cst.Attribute(frame, cst.Name('loc'))),
+            cst.parse_statement(f'{snapshot.value} = {data.value}._mx_ptable_{table_name} if {guard} else None'),
+            self._assign(captured_key.value, key),
+        )
+        signature = o.signature('oi', None, label, -7)
+        native = self._m('zip_prepared_prefix', snapshot, frame, loc, captured_key, cst.Integer(str(signature)))
+        test = cst.parse_expression(f'({result.value} := {_code(native)}) is not None')
+        native_return = returned.with_changes(body=[returned.body[0].with_changes(value=result)])
+        fallback_read = subscript.with_changes(value=loc, slice=[subscript.slice[0].with_changes(
+            slice=subscript.slice[0].slice.with_changes(value=captured_key))])
+        fallback_assignment = assignment.with_changes(body=[assignment.body[0].with_changes(value=fallback_read)])
+        self._record(subscript, 'L8', call)
+        o.lowered[-1]['pandas_when'] = ('the selector was not already proven safe; or the bound frame, metadata, '
+                                       'prefix or column cannot use the ordered snapshot')
+        o.lowered_text.add(normal(_code(column)))
+        return [*statements[:head], *prefix_lookup,
+                self._branch(test, [native_return], [fallback_assignment, returned])]
+
     def comprehension(self, original, updated):
         """A comprehension whose first ``for`` walks ``X.index``, a column of a view or its ``.items()``: positions
         in pandas order, the target names read as the labels (values) of each position's row."""
@@ -2579,14 +2715,20 @@ class _Rewrite(cst.CSTTransformer):
             self.replaced_names.add(row.value.value.value)
         name = cell or (o.row_names.get(_code(row)) if o.row_names else None)
 
+        held_state = None
+
         def position(hold):
+            nonlocal held_state
             if per_read:
                 labels = []
                 suffix, cargs = self._codes(hold, [], _parts(key), levels, labels)
                 return self._next(self._m('row' + suffix, o.ref(hold), *cargs)), labels
             field = o.row_field(hold, key, name, self._detached(key))
+            held_state = hold.state
             return cst.parse_expression(f'self.{field}'), [cst.parse_expression(f'self.{field} > 0')]
         read, kind, test = self._field_read(call, schema, label, position)
+        if held_state is not None and kind == 'obj' and not o.cells.has_args() and o.cells.get_rettype_expr() == 'str':
+            self.held_string_read = read, test, held_state
         self._record(original, 'L2', call)
         return self._lowered(test, read, self._fallback(updated, call), kind)
 

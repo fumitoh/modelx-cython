@@ -24,6 +24,7 @@ pandas operation, never by how it is spelled:
 | L5 | `.index.max()`, `.index.min()` and their parts |
 | L6 | `.index.asof(x)` |
 | L7 | `key in T.index` |
+| L8 | Ordered index and column walks, including a terminal list of `(int(label), float(value))` pairs from `zip(V.index, V["column"])` on one prefix view |
 
 A read is made fast only on a table with a unique index, with key parts whose compiled types match the index
 levels, and with a column label known at build time. Anything else is left to pandas.
@@ -42,7 +43,7 @@ One entry per cell that reads a table, one record per read site:
 }
 ```
 
-- `form` is one of `L1` to `L7`, or `pandas` for a read left to pandas.
+- `form` is one of `L1` to `L8`, or `pandas` for a read left to pandas.
 - `reason` is given for every `pandas` entry: the operation is not a recognised form, or the index is not unique,
   or a key type does not match a level, or the column is not known at build time.
 - The report states what the build decided and why. It does not claim that a result equals live modelx: that
@@ -56,6 +57,11 @@ One entry per cell that reads a table, one record per read site:
 - In any other Space, the frame is looked up once per formula call.
 - A frame is found by identity: a new frame, recomputed from new inputs, is prepared afresh.
 - A formula that edits a frame in place keeps all its reads of that frame on pandas.
+
+The terminal ZIP form uses the snapshot published by the frame Cell at its ordinary bind. The compiler admits
+only an exact receiver and an already cached string selector or an existing held native field read. The
+frame and its axes must still match that binding, and its metadata must be empty. Otherwise the formula
+uses its captured pandas accessor. Input check mode leaves this form on pandas.
 
 ## Input changes
 
