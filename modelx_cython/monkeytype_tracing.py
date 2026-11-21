@@ -55,7 +55,7 @@ class CallTrace:    # Updated CallTrace
             func: The function where the trace occurred
             arg_vals: The collected argument values
             ret_val: The collected return value. This will be None if the called function returns
-                due to an unhandled exception.
+                due to an unhandled exception; ``raised`` then tells the two apart.
             yield_val: The collected yield value. Should not be relevant in modelx
         """
         self.func = func
@@ -63,6 +63,7 @@ class CallTrace:    # Updated CallTrace
         self.loc_vals = loc_vals
         self.ret_val = ret_val
         self.yield_val = yield_val
+        self.raised = False     # set by MxCallTracer when the frame unwound by an exception
 
     @property
     def funcname(self) -> str:

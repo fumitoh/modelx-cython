@@ -55,7 +55,7 @@ from modelx_cython.consts import (
     FORMULA_PREF,
     SPACE_PREF,
     MODULE_PREF,
-    CY_MOD
+    CY_MOD,
 )
 from modelx_cython.typedefs import str_to_type, normalize_type
 
@@ -199,6 +199,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
     # True if some formula calls this cells with keyword arguments, which
     # C-level (cpdef) calls do not support; set in cli.main_handler
     called_with_kwargs: bool = False
+    formula_has_captured_default: bool = False
+    forwarded_native_result: bool = False
 
     def __init__(self, cls_info, lx_info, rt_info, spec) -> None:
         """Merge lexical, runtime and spec info, validating the spec's
@@ -352,6 +354,12 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         self._object_param(arg, reason, formula_only=self.has_formula_def)
 
+    def restore_formula_param_type(self, arg: str) -> None:
+        """Retain the cached input type after lowering its formula rebinding."""
+        del self._formula_object_params[arg]
+        _logger.info("parameter '%s' of %s keeps its native input type after lowering",
+                     arg, self.formula_fqname)
+
     @cached_property
     def norm_type(self) -> type:
         """Normalized Python type of the cells' return value.
@@ -401,6 +409,12 @@ class CombinedCellsInfo(LexicalCellsInfo):
         False when the sample run never called this cells.
         """
         return bool(self._rt)
+
+    @cached_property
+    def model_path(self):
+        """Dotted Cell name as it appears in the exported model."""
+        spaces = [part[len(MODULE_PREF):] for part in self.module.split('.')[1:-1]]
+        return '.'.join((*spaces, self.cls[len(SPACE_PREF):], self.name))
 
     def has_args(self):
         """Return True if the cells has one or more parameters."""
@@ -469,6 +483,10 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """
         # A plain property, not cached: `usage` is assigned after
         # construction, between the build and transform phases.
+        if self.has_typeinfo() and not getattr(self._rt, 'array_buffer_compatible', True):
+            if self._force_memoryview:
+                raise ValueError(f'{self.fqname}: memoryview needs one native-endian float64/int64 buffer format')
+            return False
         if self._force_memoryview:
             return True
         if self.usage is None:
@@ -545,6 +563,78 @@ class CombinedCellsInfo(LexicalCellsInfo):
         else:
             return "object"
 
+    @property
+    def _can_bind_native_result(self):
+        return (self.has_formula_def and not self.is_special()
+                and not self.body_has_closure and not self.formula_is_generator
+                and not self.formula_has_captured_default
+                and not self.called_with_kwargs and not self.has_spec_rettype)
+
+    @property
+    def observed_native_binding(self):
+        binding = self.observed_provider_type
+        if self._can_bind_native_result and binding and binding.declaration.view_type is not None:
+            return binding
+        return None
+
+    @property
+    def observed_provider_type(self):
+        return getattr(self._rt, 'observed_provider_binding', None)
+
+    @property
+    def admitted_table(self):
+        """auto-tables (D104): the sampled value was a plain pandas frame admitted as a table."""
+        return getattr(self._rt, 'admitted_table', False)
+
+    @property
+    def admission_record(self):
+        """auto-tables: the admission record of a zero-argument formula that returned a DataFrame."""
+        return getattr(self._rt, 'admission_record', None)
+
+    @property
+    def frame_row_result(self):
+        """auto-tables (D119): every sampled value is a row (Record) of a table admitted from a frame."""
+        return getattr(self._rt, 'frame_row_result', False)
+
+    @property
+    def pandas_fallbacks(self):
+        """auto-tables: pandas fallbacks on admitted tables in the sample, ``{line: {operation: calls}}``."""
+        return getattr(self._rt, 'pandas_fallbacks', None) or {}
+
+    @property
+    def table_schema(self):
+        """M1: key and column kinds of a traced helper Table result (tracer.table_schema)."""
+        return getattr(self._rt, 'table_schema', None)
+
+    @property
+    def table_result(self):
+        """M1: the provider type id when every sampled result is that provider type's
+        exact owner (a helper Table or Record), whether or not it is bound natively."""
+        binding = self.observed_provider_type
+        return binding.type_id if binding is not None else None
+
+    @property
+    def native_table_result(self):
+        binding = self.native_provider_binding
+        handle = binding.declaration.handle if binding is not None else None
+        return handle is not None and handle.type == 'TableHandle'
+
+    @property
+    def native_provider_binding(self):
+        binding = self.observed_native_binding
+        if binding and (binding.declaration.admission == 'observed'
+                        or binding.declared or self.forwarded_native_result):
+            return binding
+        return None
+
+    @property
+    def native_result_binder(self):
+        binding = self.native_provider_binding
+        if binding:
+            from modelx_cython.helpers import module_name
+            return f'{module_name(binding.manifest.provider)}.{binding.declaration.bind}'
+        return None
+
     def is_arg_int(self, arg: str):
         """Return True if the type of parameter ``arg`` (see
         :meth:`arg_type`) is integral.
@@ -570,11 +660,13 @@ class CombinedCellsInfo(LexicalCellsInfo):
         """Return True if results can be cached in a fixed-size C
         array.
 
-        A cells is arrayable when all its parameters are integral and
-        it returns a real-valued scalar (not an array).  Requires
-        parameters and type information.
+        A Cell with integral parameters and a real scalar result can use
+        dense storage. A declared physical window overrides the automatic
+        size policy and can use signed offsets. This selects storage only.
         """
         assert self.has_args() and self.has_typeinfo()
+        if getattr(self._rt, 'has_negative_args', False):
+            return False      # a negative argument: dictionary cache until commit 2's shifted dense caches
         if self.is_int_args and self.is_real_value and not self.is_array_returned:
             return True
         else:
@@ -583,10 +675,8 @@ class CombinedCellsInfo(LexicalCellsInfo):
     def get_array_decl_expr(self, rettype_expr="", c_style=False):
         """Return the C array declaration expression for the cache.
 
-        Appends one ``[size]`` per parameter to the return type
-        expression (e.g. ``double[10][20]``), taking sizes from the
-        parent class's :attr:`ClassInfo.cells_arg_sizes` entry for
-        this cells' parameter tuple.
+        Appends one ``[size]`` per physical cache axis to the return
+        type expression (e.g. ``double[10][20]``).
 
         Parameters
         ----------
@@ -645,6 +735,9 @@ class CombinedRefInfo:
     mx_class: str = ''
     decl_type_expr: str = ''
     is_relative: bool = False
+    helper = None
+    enum = None
+    enum_safe = False
 
     def __init__(self, module,
                  cls,
@@ -655,7 +748,16 @@ class CombinedRefInfo:
         When ``rt_info`` is falsy, only ``module``, ``cls`` and
         ``name`` are set; the class-level defaults remain in effect.
         """
+        from .helpers import CAPABILITIES
+        self.helper_members = getattr(rt_info, 'helper_members', {})
+        self.helper_parameters = getattr(rt_info, 'helper_parameters', None)
+        self.helper_result_type = getattr(rt_info, 'helper_result_type', None)
+        for field_name, _ in CAPABILITIES.values():
+            setattr(self, field_name, getattr(rt_info, field_name, None))
         if rt_info:
+            self.helper = getattr(rt_info, 'helper', None)
+            self.enum = getattr(rt_info, 'enum', None)
+            self.enum_safe = getattr(rt_info, 'enum_safe', False)
 
             if rt_info.mx_class:
                 if rt_info.mx_class.startswith(module + "."):
@@ -734,12 +836,10 @@ class ClassInfo:
         Annotated only; never assigned.  Space parameters are stored
         in ``refs`` instead.
     _cells_max_args : dict
-        Maps a tuple of parameter names to the maximum argument
-        values observed across all traced cells sharing that
-        parameter tuple.
-    _max_arg_cells : dict
-        Maps a parameter tuple to ``{param: cells fqname}`` recording
-        which cells produced each maximum, for logging.
+        Maps a tuple of integral parameter names to observed maxima
+        and the Cells that produced them, for dense array sizing.
+    _associative_max_args : dict
+        The same observations grouped by full parameter signature.
     """
 
     name: str
@@ -763,7 +863,9 @@ class ClassInfo:
         self.logger = module.logger
         self.cells = {}
         self._cells_max_args = {}
-        self._max_arg_cells = {}    # keep cells fqname for logging
+        self._associative_max_args = {}
+        self.declared_axes = {}     # parameter tuple -> {parameter: where its size is declared}
+        self.declared_lowers = {}   # parameter tuple -> {parameter: declared lower bound} (R-3-lower pairs)
         self.refs = {}
         self.spaces = []
         self._init_cells()
@@ -789,19 +891,19 @@ class ClassInfo:
                 lx_info, rt_info,
                 self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS, {}).get(name, {})
             )
-            if rt_info and not uncached:
-                args = tuple(rt_info.max_args)
-                maxes = tuple(rt_info.max_args.values())
-                if args not in self._cells_max_args:
-                    self._cells_max_args[args] = maxes
-                    self._max_arg_cells[args] = {k: lx_info.fqname for k in args}
-                else:
-                    d = dict(zip(args, self._cells_max_args[args]))
-                    for k, v in rt_info.max_args.items():
-                        if v > d[k]:
-                            d[k] = v
-                            self._max_arg_cells[args][k] = lx_info.fqname
-                    self._cells_max_args[args] = tuple(d.values())
+            if rt_info and not uncached and rt_info.max_args:
+                self._record_max_args(self._cells_max_args, tuple(rt_info.max_args),
+                                      rt_info.max_args, lx_info.fqname)
+                if not lx_info.is_special():
+                    self._record_max_args(self._associative_max_args, tuple(lx_info.params),
+                                          rt_info.max_args, lx_info.fqname)
+
+    @staticmethod
+    def _record_max_args(observed, signature, maxima, cell):
+        bounds = observed.setdefault(signature, {})
+        for key, maximum in maxima.items():
+            if key not in bounds or maximum > bounds[key][0]:
+                bounds[key] = maximum, cell
 
     def _init_spaces(self):
         """Copy the child space names found by the visitor."""
@@ -829,12 +931,16 @@ class ClassInfo:
         params = self.logger.param_info.get(self.fqname, None)
         if params:
             for param, rt_info in params.items():
-                self.refs[param] = CombinedRefInfo(
-                    module=self.module.fqname,
-                    cls=self.name,
-                    name=param,
-                    rt_info=rt_info
-                )
+                slot = self.module.fqname, self.name, param
+                parameter = CombinedRefInfo(*slot, rt_info=rt_info)
+                reference = self.refs.get(param)
+                # The base Space and its ItemSpaces share a declaration. A
+                # parameter can replace a Reference of another type there.
+                if (reference is not None and reference.type_ is not None
+                        and reference.get_type_expr(c_style=True)
+                        != parameter.get_type_expr(c_style=True)):
+                    parameter = CombinedRefInfo(*slot, rt_info=None)
+                self.refs[param] = parameter
 
     @cached_property
     def fqname(self):
@@ -875,40 +981,57 @@ class ClassInfo:
         from the spec get their sizes solely from the observed maxima
         plus one.
         """
-        # params = self.module.spec.get_spec(self.fqname).get(TransSpec.CELLS_PARAMS, {})
+        sizes = self._cache_sizes(self._cells_max_args)
+        return {keys: tuple(values[key] for key in keys) for keys, values in sizes.items()}
 
+    @cached_property
+    def associative_arg_sizes(self):
+        return self._cache_sizes(self._associative_max_args)
+
+    def _cache_sizes(self, observed):
+        # cells_param_size of this Space, of the enclosing Spaces and of the model (nearest wins):
+        # an entry for the exact parameter tuple sizes that tuple; a single-name entry sizes that
+        # parameter's axis of every other tuple in scope.
+        tuples, names = self.module.spec.get_declared_sizes(self.fqname)
+        tuple_lowers, name_lowers = self.module.spec.get_declared_lowers(self.fqname)
         sizes = {}
-        if TransSpec.CELLS_PARAM_SIZE in self.module.spec.get_spec(self.fqname):
-            params = self.module.spec.get_spec(self.fqname)[TransSpec.CELLS_PARAM_SIZE]
-            # Tuplize 1-arg
-            for k, v in params.items():
-                if isinstance(k, tuple):
-                    sizes[k] = v
-                else:
-                    sizes[(k,)] = (v,)
-
-        elif TransSpec.CELLS_PARAMS in self.module.spec.get_spec(self.fqname):  # deprecated
-            params = self.module.spec.get_spec(self.fqname)[TransSpec.CELLS_PARAMS]
-            # Tuplize 1-arg
-            for k, v in params.items():
-                if TransSpec.SIZE in v:
-                    if isinstance(k, tuple):
-                        sizes[k] = v[TransSpec.SIZE]
-                    else:
-                        sizes[(k,)] = (v[TransSpec.SIZE],)
-
-        for args, maxes in self._cells_max_args.items():
-            if args in sizes:
-                d = dict(zip(args, sizes[args]))
-                for k, v in zip(args, maxes):
-                    if v + 1 > d[k]:
-                        _logger.info(f"Specified max size of {d[k]} for cells parameter {k} in {self.name} is replaced by {v + 1} from {self._max_arg_cells[args][k]}")
-                        d[k] = v + 1
-                sizes[args] = tuple(d.values())
-            else:
-                sizes[args] = tuple(i + 1 for i in maxes)
-
+        for keys, (stops, where) in tuples.items():
+            sizes[keys] = dict(zip(keys, stops))
+            self.declared_axes[keys] = {key: where for key in keys}
+            if tuple_lowers.get(keys):
+                self.declared_lowers[keys] = dict(tuple_lowers[keys])
+        for keys, maxima in observed.items():
+            bounds = sizes.setdefault(keys, {})
+            declared = self.declared_axes.setdefault(keys, {})
+            for key, (maximum, cell) in maxima.items():
+                if key not in bounds and key in names:
+                    bounds[key], declared[key] = names[key]
+                    if key in name_lowers:
+                        self.declared_lowers.setdefault(keys, {})[key] = name_lowers[key]
+                stop = maximum + 1
+                if key in bounds and stop <= bounds[key]:
+                    continue
+                if key in bounds:
+                    _logger.info(
+                        f"Specified max size of {bounds[key]} for cells parameter {key} "
+                        f"in {self.name} is replaced by {stop} from {cell}")
+                    lower = self.declared_lowers.get(keys, {}).get(key, 0)
+                    reported = self.__dict__.setdefault('_widened_reported', set())
+                    if (cell, key, 'stop') not in reported:
+                        reported.add((cell, key, 'stop'))
+                        info = self.cells.get(cell.rsplit('.', 1)[-1].split(FORMULA_PREF, 1)[-1])
+                        _logger.warning(RANGE_WIDENED.format(
+                            cell=getattr(info, 'model_path', cell), params=', '.join(keys), key=key, lower=lower,
+                            stop=bounds[key], end='stop', sampled=maximum, used_lower=lower, used_stop=stop))
+                bounds[key] = stop
         return sizes
+
+
+# R-3-lower: a sampled argument outside a declared range widens it (as upstream does for a declared size);
+# the build says so, one line per cell and parameter. For the stop, the cell named is the one whose sample
+# widened it; the widened range applies to every Cell with the same parameter tuple in that Space.
+RANGE_WIDENED = ('{cell} ({params}): parameter {key} declared range [{lower}, {stop}), sampled {sampled} '
+                 'beyond the declared {end}, range used [{used_lower}, {used_stop})')
 
 
 class ModuleInfo:

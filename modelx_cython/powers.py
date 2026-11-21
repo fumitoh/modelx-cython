@@ -34,14 +34,18 @@ removes the failure without touching integer arithmetic at all.
 The proof is the conservative classifier below.  Every operand is
 :data:`KIND_FLOAT`, :data:`KIND_INT` or :data:`KIND_UNKNOWN`, and only
 numeric literals, the declaring cells' own parameters, calls to cells
-the resolver reaches, scalar references and arithmetic over those are
-ever known.  Everything else -- local variables, subscripts, module
+the resolver reaches, scalar references, single-assignment locals
+annotated with the builtin ``float``, and arithmetic over those are
+ever known. Everything else -- other locals, subscripts, module
 attributes, and anything inside a construct that binds names of its own,
-where a name can shadow a parameter of the cells -- is unknown, and an
-unknown operand leaves the power exactly as modelx exported it.  A power
-that is left alone therefore behaves as it does without this pass:
-usually it compiles, and where it is compared it still fails, which is a
-loud error rather than a wrong number.
+where a name can shadow a parameter of the cells -- is unknown. This pass
+leaves powers with unknown operands for ordinary Cell lowering. The object
+operator in :mod:`~modelx_cython.ordered_arguments` preserves Python power
+semantics where Cython would otherwise infer a complex intermediate.
+
+A native double return can also use a uniquely assigned local from a
+resolved double Cell or Reference. That local proof applies only to arithmetic directly
+feeding the return, where Cython already requires a real result.
 
 The same classifier decides, in :func:`demote_rebound_params`, whether a
 parameter that a formula binds again keeps its C type there: only if
@@ -59,12 +63,16 @@ KIND_UNKNOWN : str
 import logging
 from typing import Dict, List, Mapping, Optional
 
+from collections import Counter
 import libcst as cst
 import libcst.matchers as m
+from libcst.metadata import ExpressionContext
 
-from modelx_cython.consts import CY_MOD, MX_POW, MX_SYS_MOD
+from modelx_cython.consts import CY_MOD, MX_POW, MX_SELF, MX_SYS_MOD
 from modelx_cython.typedefs import CY_FLOAT_T, CY_INT_T
 from modelx_cython.usage import RESOLVED, CellsResolver, _extract_self_chain
+from modelx_cython.scopes import CstFacts, OPAQUE_SCOPES as _OPAQUE_SCOPES, has_scope_effects, lexical_nodes
+from modelx_cython.syntax import local_assignment, single_statement, walk
 
 _logger = logging.getLogger(__name__)
 
@@ -86,10 +94,6 @@ _NUMERIC_OPS = (
 # inside one is ever rewritten.  A nested ``def`` or ``class`` belongs
 # here as much as a comprehension does: modelx exports such a formula
 # verbatim, and its body reaches Cython inside the ``@cfunc`` method.
-_OPAQUE_SCOPES = (
-    cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp, cst.Lambda,
-    cst.FunctionDef, cst.ClassDef,
-)
 
 
 def kind_of_type_expr(type_expr: str) -> str:
@@ -224,11 +228,23 @@ class OperandKind:
         )
 
 
+MX_SIGNED_POW = "_mx_signed_pow"
+
+
+def _nonnegative_integer(expr):
+    """``expr`` is an integer literal >= 0, as ``+2`` or ``20`` (not ``-1``)."""
+    if isinstance(expr, cst.UnaryOperation) and isinstance(expr.operator, cst.Plus):
+        expr = expr.expression
+    return isinstance(expr, cst.Integer)
+
+
 class _PowerRewriter(cst.CSTTransformer):
     """Replace provably real ``**`` operations with ``_mx_sys._mx_pow``."""
 
-    def __init__(self, operand_kind: OperandKind) -> None:
+    def __init__(self, operand_kind: OperandKind, path=None) -> None:
         super().__init__()
+        self._path = path                 # the Cell's "Space.cell", named by a checked integer power
+        self.integer_rewritten = 0
         self._kind = operand_kind
         self._opaque_depth = 0
         self.rewritten = 0
@@ -259,6 +275,19 @@ class _PowerRewriter(cst.CSTTransformer):
         # been rewritten into a call in ``updated_node``
         base = self._kind.kind(original_node.left)
         exponent = self._kind.kind(original_node.right)
+        integer_base = base
+        if (integer_base == KIND_INT and self._path is not None
+                and not isinstance(original_node.left, cst.Integer)
+                and _nonnegative_integer(original_node.right)):
+            # Cython types a C integer raised to a non-negative integer literal as a C integer
+            # and computes it unchecked (__Pyx_pow_*): the checked power raises instead of wrapping
+            self.integer_rewritten += 1
+            return cst.Call(
+                func=cst.Attribute(value=cst.Name(MX_SYS_MOD), attr=cst.Name(MX_SIGNED_POW)),
+                args=[cst.Arg(updated_node.left.with_changes(lpar=(), rpar=())),
+                      cst.Arg(updated_node.right.with_changes(lpar=(), rpar=())),
+                      cst.Arg(cst.SimpleString(repr(self._path)))],
+                lpar=updated_node.lpar, rpar=updated_node.rpar)
         if exponent == KIND_FLOAT and base != KIND_UNKNOWN:
             self.rewritten += 1
             return cst.Call(
@@ -307,6 +336,8 @@ def rewrite_powers(
     ref_kinds: Mapping[str, Mapping[str, str]],
     cls_fqname: str,
     cells,
+    *,
+    checked_integer_powers=True,
 ) -> cst.FunctionDef:
     """Rewrite the provably real powers in one method body.
 
@@ -335,8 +366,8 @@ def rewrite_powers(
         return node
     rewriter = _PowerRewriter(
         OperandKind(resolver, cells_kinds, ref_kinds, cls_fqname,
-                    _param_kinds(cells))
-    )
+                    _param_kinds(cells)),
+        path=getattr(cells, 'model_path', None) if checked_integer_powers else None)
     updated = node.body.visit(rewriter)
     if rewriter.declined:
         _logger.info(
@@ -344,7 +375,7 @@ def rewrite_powers(
             "fractional exponent there still compiles to complex "
             "arithmetic: " + "; ".join(rewriter.declined[:3])
         )
-    if not rewriter.rewritten:
+    if not rewriter.rewritten and not rewriter.integer_rewritten:
         return node
     return node.with_changes(body=updated)
 

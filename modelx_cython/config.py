@@ -22,6 +22,8 @@ cells return type or declaring maximum cells parameter sizes.
 """
 
 from typing import Union, Sequence, Mapping
+import os
+from dataclasses import dataclass
 from modelx_cython.consts import (
     FILE_PREF,
     GLOBAL_PREF,
@@ -30,11 +32,47 @@ from modelx_cython.consts import (
 )
 
 
+@dataclass(frozen=True)
+class CompilerPolicy:
+    """Resolve dependent diagnostic options once, before code generation."""
+    # integer guards (owner's rule): 'auto' (default) compiles without overflow checks when no
+    # traced integer reaches UNCHECKED_LIMIT in magnitude, with them otherwise; 'checked' and
+    # 'unchecked' force a mode. The build resolves 'auto' after the trace (resolve_integer_checks).
+    integer_checks: str = 'auto'
+
+    @classmethod
+    def resolve(cls, data):
+        values = dict(
+            integer_checks=data.get('integer_checks', 'auto'))
+        for name, value in values.items():
+            if name not in ('parallel_workers', 'native_cache_hits', 'integer_checks') and type(value) is not bool:
+                raise ValueError(f'{name} must be a boolean')
+        if values['integer_checks'] not in ('auto', 'checked', 'unchecked'):
+            raise ValueError('integer_checks must be auto, checked or unchecked')
+        return cls(**values)
+
+
+# integer guards: with every traced integer below 2**31 in magnitude, a product of two stays below
+# 2**62, so the ordinary arithmetic of a formula keeps far from the 64-bit limit
+UNCHECKED_LIMIT = 1 << 31
+UNCHECKED_LIMIT_NOTE = (
+    'Unchecked mode: intermediate values are not traced, so a product of several large terms or an '
+    'integer power could exceed 64 bits and would wrap, as on upstream; set "integer_checks": "checked" '
+    'in the spec to force the checked mode.')
+
+
+def resolve_integer_checks(policy, largest_traced_integer):
+    """The integer-check mode for this build: the spec's, or for 'auto' 'unchecked' when the
+    largest traced integer is below UNCHECKED_LIMIT in magnitude and 'checked' otherwise."""
+    if policy.integer_checks != 'auto':
+        return policy.integer_checks
+    return 'unchecked' if largest_traced_integer < UNCHECKED_LIMIT else 'checked'
+
 class TransSpec:
     """Wrapper around the user-supplied translation-spec dictionary.
 
     The spec is a nested dict (read from the spec file with
-    ``ast.literal_eval``) in which each nesting level describes one
+    a safe literal decoder) in which each nesting level describes one
     space.  A space-level dict may have these keys:
 
     * ``"spaces"``: dict mapping child space names (without prefixes)
@@ -43,7 +81,11 @@ class TransSpec:
       a tuple of parameter names) to its maximum size (or a tuple of
       sizes).  Used to size the fixed-length caches generated for
       cells with parameters; sampled maximum arguments can enlarge
-      but not shrink these sizes.
+      but not shrink these sizes. Also read at the model level (top of
+      the spec) and in enclosing Spaces: the nearest declaration of a key
+      wins. A tuple key applies to Cells with exactly that parameter
+      tuple; a single-name key bounds that parameter's axis of every
+      cached Cell in scope whose parameter tuple has no tuple entry.
     * ``"cells"``: dict mapping cells names to per-cells dicts.
     * ``"cells_params"`` (deprecated): older form of
       ``"cells_param_size"``; maps a parameter name (or tuple) to a
@@ -65,6 +107,13 @@ class TransSpec:
 
     The ``"space_params"`` and ``"param_type"`` keys are defined
     below but are not currently consumed by the pipeline.
+    ``"integer_checks"`` (default ``"auto"``): ``"unchecked"`` compiles C integer arithmetic
+    without overflow checks (as plain C), ``"checked"`` with them; ``"auto"`` chooses unchecked when
+    no traced integer (Cell arguments and results, References, ItemSpace parameters, integer
+    columns of input tables) reaches 2**31 in magnitude. ``_mx_integer_checks.json`` records the
+    mode used and the largest traced integer. Limit of the unchecked mode: intermediate values are
+    not traced, so a product of several large terms or an integer power could exceed 64 bits and
+    would wrap, as on upstream; set ``"integer_checks": "checked"`` to force the checked mode.
 
     Attributes
     ----------
@@ -94,8 +143,10 @@ class TransSpec:
     CELLS = "cells"
     CELLS_PARAM_SIZE = "cells_param_size"
     CELLS_PARAMS = "cells_params"   # deprecated
+    PARAM_BOUND_CHECKS = "param_bound_checks"
     SIZE = "size"   # deprecated
     RET_T = "return_type"
+    DENSE_WINDOW = "dense_window"
     RET_MEMORYVIEW = "memoryview"   # RET_T value forcing memoryview emission
     PARAM_T = "param_type"
 
@@ -110,6 +161,81 @@ class TransSpec:
         """
         
         self._data = data
+        self.policy = CompilerPolicy.resolve(data)
+
+    def get_declared_sizes(self, object_path: str):
+        """Return ``(tuples, names)`` of the ``"cells_param_size"`` entries in
+        force for a Space: ``{parameter tuple: (sizes, where)}`` and
+        ``{parameter name: (size, where)}``. The model level comes first, then
+        each enclosing Space down to the addressed one; a nearer declaration
+        of the same key wins. A level without ``"cells_param_size"`` uses its
+        deprecated ``"cells_params"`` sizes, as for one Space."""
+        tuples, names = {}, {}
+
+        def merge(data, where):
+            declared = data.get(self.CELLS_PARAM_SIZE)
+            if declared is None:
+                declared = {keys: config[self.SIZE]
+                            for keys, config in data.get(self.CELLS_PARAMS, {}).items()
+                            if self.SIZE in config}
+            for keys, stops in declared.items():
+                if isinstance(keys, tuple):
+                    tuples[keys] = tuple(_declared_stop(keys, k, v) for k, v in zip(keys, stops)), where
+                else:
+                    names[keys] = _declared_stop(keys, keys, stops), where
+
+        merge(self._data, 'model')
+        data, path = self._data, []
+        for name in object_path.split(".")[1:]:
+            for prefix in (MODULE_PREF, SPACE_PREF):
+                if name[:len(prefix)] == prefix:
+                    name = name[len(prefix):]
+                    break
+            else:
+                continue
+            data = (data.get(self.SPACES) or {}).get(name) or {}
+            if not data:
+                break
+            path.append(name)
+            merge(data, '.'.join(path))
+        return tuples, names
+
+    def get_declared_lowers(self, object_path: str):
+        """Return ``(tuples, names)`` of the declared lower bounds in force for a Space, with the same
+        precedence as :meth:`get_declared_sizes`: ``{parameter tuple: {parameter: lower}}`` and
+        ``{parameter name: lower}``. A declaration is a size (lower bound: today's default) or a
+        ``(lower, stop)`` pair; only pairs appear here (R-3-lower)."""
+        tuples, names = {}, {}
+
+        def merge(data):
+            declared = data.get(self.CELLS_PARAM_SIZE)
+            if declared is None:
+                declared = {keys: config[self.SIZE]
+                            for keys, config in data.get(self.CELLS_PARAMS, {}).items()
+                            if self.SIZE in config}
+            for keys, stops in declared.items():
+                if isinstance(keys, tuple):
+                    tuples[keys] = {k: _declared_lower(keys, k, v)
+                                    for k, v in zip(keys, stops) if _declared_lower(keys, k, v) is not None}
+                elif _declared_lower(keys, keys, stops) is not None:
+                    names[keys] = _declared_lower(keys, keys, stops)
+                else:
+                    names.pop(keys, None)
+
+        merge(self._data)
+        data = self._data
+        for name in object_path.split(".")[1:]:
+            for prefix in (MODULE_PREF, SPACE_PREF):
+                if name[:len(prefix)] == prefix:
+                    name = name[len(prefix):]
+                    break
+            else:
+                continue
+            data = (data.get(self.SPACES) or {}).get(name) or {}
+            if not data:
+                break
+            merge(data)
+        return tuples, names
 
     def get_spec(self, object_path: str):
         """Return the space-level spec dict for a dotted object path.
@@ -173,3 +299,23 @@ class TransSpec:
                     return {}
 
         return data
+
+
+def _declared_pair(keys, key, value):
+    """A declaration ``(lower, stop)`` of two ints with lower < stop, else None (a plain size)."""
+    if isinstance(value, (tuple, list)):
+        if (len(value) != 2 or not all(type(v) is int for v in value) or not value[0] < value[1]):
+            raise ValueError(f'cells_param_size {keys!r}: {key} must be a size or a (lower, stop) pair of '
+                             f'ints with lower < stop, got {value!r}')
+        return tuple(value)
+    return None
+
+
+def _declared_stop(keys, key, value):
+    pair = _declared_pair(keys, key, value)
+    return value if pair is None else pair[1]
+
+
+def _declared_lower(keys, key, value):
+    pair = _declared_pair(keys, key, value)
+    return None if pair is None else pair[0]
