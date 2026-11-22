@@ -1,3 +1,6 @@
+import ast
+import subprocess
+import sys
 import types
 
 import numpy as np
@@ -88,6 +91,50 @@ def test_spec_memoryview_without_typeinfo_ignored(caplog):
     cells = CombinedCellsInfo(None, make_lx(), None,
                               {"return_type": "memoryview"})
     assert cells.get_rettype_expr(c_style=True) == "object"
+
+
+def test_associative_cache_guards_signed_coordinates(tmp_path):
+    import modelx as mx
+
+    model = mx.new_model("AssociativeBounds")
+    try:
+        space = model.new_space("Policy")
+        space.new_cells("numeric", "lambda period, rate: period * rate")
+        space.new_cells("dictionary", "lambda period, tag: (period, tag)")
+        space.new_cells("object_key", "lambda tag: str(tag)")
+        space.new_cells("numeric_user", "lambda period, rate: numeric(period, rate)", is_cached=False)
+        space.new_cells("uncached", "lambda period: float(period)", is_cached=False)
+        model.export(tmp_path / "exported")
+    finally:
+        model.close()
+    (tmp_path / "sample.py").write_text(
+        "from exported import mx_model\n"
+        "s = mx_model.Policy\n"
+        "s.numeric_user(-3, 1.5); s.numeric((1 << 63) - 1, 1.5)\n"
+        "s.dictionary(-(1 << 63), 'x'); s.dictionary(4, 'x')\n"
+        "s.object_key('x'); s.object_key(1000); s.uncached(1000)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "spec.py").write_text(repr({"spaces": {"Policy": {"cells_param_size": {
+        ("period", "tag"): (8, 1),
+    }}}}), encoding="utf-8")
+    subprocess.run([sys.executable, "-B", "-m", "modelx_cython", "exported",
+                    "--translate-only"], cwd=tmp_path, check=True)
+    source = (tmp_path / "exported_cy" / "_mx_classes.py").read_text(encoding="utf-8")
+    methods = {node.name: node for node in ast.walk(ast.parse(source))
+               if isinstance(node, ast.FunctionDef)}
+    numeric = methods["numeric"].body[0]
+    dictionary = methods["dictionary"].body[0]
+    assert ast.dump(numeric.test) == ast.dump(ast.parse("not (-3 <= period)", mode="eval").body)
+    assert ast.dump(dictionary.test) == ast.dump(ast.parse("not (period < 8)", mode="eval").body)
+    assert "Policy.numeric" in numeric.body[0].exc.args[0].value
+    assert "Policy.dictionary" in dictionary.body[0].exc.args[0].value
+    private = next(node for name, node in methods.items() if name.startswith("_mx_cache_entry_"))
+    assert ast.dump(private.body[0]) == ast.dump(numeric)
+    for name in ("object_key", "uncached"):
+        assert "argument index out of range" not in ast.unparse(methods[name])
+    assert ".get(" in ast.unparse(methods["numeric"])
+    assert "self._v_dictionary" in ast.unparse(methods["dictionary"])
 
 
 # --------------------------------------------------------------------
@@ -197,6 +244,22 @@ def make_dflt_cells(arg_types, defaults, spec=None, has_formula_def=True,
     cells = CombinedCellsInfo(None, lx, rt, spec or {})
     cells.has_formula_def = has_formula_def
     return cells
+
+
+def test_explicit_dense_window_overrides_only_storage_size():
+    window = ((0, 1000), (-12, 700))
+    cells = make_dflt_cells({"t": int, "k": int}, {}, {"dense_window": window})
+    cells.parent = types.SimpleNamespace(
+        cells_arg_sizes={("t", "k"): (1100, 1200)},
+        module=types.SimpleNamespace(spec=types.SimpleNamespace(automatic_optimizations=True)),
+    )
+    cells._rt.has_negative_args = True
+    cells._rt.min_args = {"k": -12}
+    assert cells.is_arrayable()
+    assert tuple((axis.lower, axis.stop) for axis in cells.dense_axes) == window
+    assert cells.has_dense_spill
+    cells.has_formula_def = False
+    assert not cells.is_arrayable()
 
 
 def test_default_not_of_traced_type_is_object(caplog):

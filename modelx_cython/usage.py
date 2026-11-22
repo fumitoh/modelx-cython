@@ -28,7 +28,9 @@ element access counts as unsafe, and call sites that cannot be resolved
 to a cells poison every cells with a matching name.
 """
 
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
+import sys
 import logging
 import numbers
 from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple, Union
@@ -50,6 +52,9 @@ from modelx_cython.consts import (
     SPACE_PREF,
 )
 from modelx_cython.parser import ParentScopeAddin
+from modelx_cython.helper_members import helper_reference
+from modelx_cython.scopes import CstFacts
+from modelx_cython.syntax import arguments, statements
 
 _logger = logging.getLogger(__name__)
 
@@ -109,15 +114,40 @@ class CellsResolver:
         refs_by_class: Mapping[str, Mapping[str, str]],
         spaces_by_class: Mapping[str, Mapping[str, str]],
         scalar_refs_by_class: Optional[Mapping[str, Set[str]]] = None,
+        locked_scalar_results: Optional[Mapping[str, str]] = None,
+        unlocked_scalar_results: Optional[Mapping[str, str]] = None,
     ) -> None:
         self._cells = cells_by_class
         self._refs = refs_by_class
         self._spaces = spaces_by_class
         self._scalar_refs = scalar_refs_by_class or {}
+        self.locked_scalar_results = locked_scalar_results or {}
+        self.unlocked_scalar_results = unlocked_scalar_results or {}
+        self.provider_results = {}
+        self.observed_provider_results = {}
+        # M1 (W1.1) facts for typed table reads: cells fqname -> helper table_schema(t),
+        # cells fqname -> provider type id of a traced helper Table/Record result,
+        # cells with a cached formula; cell_rettype() reads the final C return type.
+        self.table_schemas = {}
+        self.table_results = {}
+        # cells fqname -> 'pandas.DataFrame' / 'pandas.Series': zero-argument cells whose every
+        # sampled result is that pandas class; reads through them are reported, never lowered.
+        self.pandas_results = {}
+        self.frame_schemas = {}          # T-3: zero-argument cells fqname -> tracer.frame_schema
+        self.cached_cells = set()
+        self._cell_infos = {}
         self._name_index: Dict[str, List[str]] = {}
         for cells in cells_by_class.values():
             for name, fqname in cells.items():
                 self._name_index.setdefault(name, []).append(fqname)
+
+    def cell_rettype(self, fqname: str) -> Optional[str]:
+        """C return type of a typed, non-special cell, read when asked (it depends on
+        provider admission, which runs after the resolver is built); None otherwise."""
+        cells = self._cell_infos.get(fqname)
+        if cells is None or cells.is_special() or not cells.has_typeinfo():
+            return None
+        return cells.get_rettype_expr(c_style=True)
 
     def resolve_chain(
         self, cls_fqname: str, chain: Sequence[str]
@@ -507,6 +537,28 @@ def collect_candidates(module_infos) -> Tuple[Dict[str, int], Set[str]]:
     return candidates, array_returning
 
 
+def pandas_type_id(tp):
+    """'pandas.DataFrame', 'pandas.Series' or 'pandas.Index' when ``tp`` is (a subclass of) one,
+    else None. issubclass against pandas' public classes, looked up only when pandas is already loaded (a
+    traced pandas type means it is), so pandas is never imported here."""
+    pd = sys.modules.get('pandas')
+    if pd is None or not isinstance(tp, type):
+        return None
+    for name in ('DataFrame', 'Series', 'Index'):
+        if issubclass(tp, getattr(pd, name)):
+            return 'pandas.' + name
+    return None
+
+
+def _pandas_result(cells):
+    """The pandas class of a zero-argument formula cell whose traced results are all of it."""
+    rt = getattr(cells, '_rt', None)
+    if (not rt or not getattr(cells, 'has_formula_def', False) or cells.has_args()
+            or getattr(rt, 'ret_type', None) is None):
+        return None
+    return pandas_type_id(rt.ret_type.value_type)
+
+
 def build_resolver(module_infos) -> CellsResolver:
     """Build a :class:`CellsResolver` over ``{fqname: ModuleInfo}``.
 
@@ -522,6 +574,13 @@ def build_resolver(module_infos) -> CellsResolver:
     refs_by_class: Dict[str, Dict[str, str]] = {}
     spaces_by_class: Dict[str, Dict[str, str]] = {}
     scalar_refs_by_class: Dict[str, Set[str]] = {}
+    locked_scalar_results: Dict[str, str] = {}
+    unlocked_scalar_results: Dict[str, str] = {}
+    provider_results = {}
+    observed_provider_results = {}
+    table_schemas, table_results, cached_cells, cell_infos = {}, {}, set(), {}
+    pandas_results = {}
+    frame_schemas = {}
 
     for fqname, info in module_infos.items():
         pkg, basename = fqname.rsplit(".", 1)
@@ -529,6 +588,32 @@ def build_resolver(module_infos) -> CellsResolver:
             cells_by_class[cls_info.fqname] = {
                 name: cells.fqname for name, cells in cls_info.cells.items()
             }
+            for cells in cls_info.cells.values():
+                binding = getattr(cells, 'native_provider_binding', None)
+                if binding is not None:
+                    provider_results[cells.fqname] = binding
+                observed = getattr(cells, 'observed_provider_type', None)
+                if observed is not None:
+                    observed_provider_results[cells.fqname] = observed
+                schema = getattr(cells, 'table_schema', None)
+                if schema is not None:
+                    table_schemas[cells.fqname] = schema
+                result = getattr(cells, 'table_result', None)
+                if result is not None:
+                    table_results[cells.fqname] = result
+                pandas_result = _pandas_result(cells)
+                if pandas_result is not None:
+                    pandas_results[cells.fqname] = pandas_result
+                    frame = getattr(getattr(cells, '_rt', None), 'frame_schema', None)
+                    if frame is not None:
+                        frame_schemas[cells.fqname] = frame
+                if cells.has_formula_def:
+                    cached_cells.add(cells.fqname)
+                    cell_infos[cells.fqname] = cells
+                if (cells.has_formula_def and not cells.is_special() and not cells.has_args()
+                        and not cells.body_has_closure and not cells.called_with_kwargs):
+                    results = locked_scalar_results if cells.is_locked else unlocked_scalar_results
+                    results[cells.fqname] = cells.get_rettype_expr(c_style=True)
             refs_by_class[cls_info.fqname] = {
                 name: (ref.mx_class or "")
                 for name, ref in cls_info.refs.items()
@@ -547,8 +632,81 @@ def build_resolver(module_infos) -> CellsResolver:
                 attr: child_mod + "." + SPACE_PREF + attr
                 for attr in cls_info.spaces
             }
-    return CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
-                         scalar_refs_by_class)
+    resolver = CellsResolver(cells_by_class, refs_by_class, spaces_by_class,
+                             scalar_refs_by_class, locked_scalar_results, unlocked_scalar_results)
+    resolver.provider_results = provider_results
+    resolver.observed_provider_results = observed_provider_results
+    resolver.table_schemas = table_schemas
+    resolver.table_results = table_results
+    resolver.pandas_results = pandas_results
+    resolver.frame_schemas = frame_schemas
+    resolver.cached_cells = cached_cells
+    resolver._cell_infos = cell_infos
+    return resolver
+
+
+def _declares_result(helper, call, binding):
+    result = getattr(helper, 'helper_result_type', None)
+    if (result is None or result[0] != binding.type_id
+            or helper.helper[0] != binding.manifest.provider or any(arg.star for arg in call.args)):
+        return False
+    if result[1] is None:
+        return True
+    name = result[1]
+    positional = [key for key, _, keyword_only in helper.helper_parameters if not keyword_only]
+    values = [arg.value for arg in call.args if arg.keyword and arg.keyword.value == name]
+    if name in positional:
+        args = [arg.value for arg in call.args if arg.keyword is None]
+        index = positional.index(name)
+        if index < len(args):
+            values.append(args[index])
+    return not values or len(values) == 1 and isinstance(values[0], cst.Tuple) and not values[0].elements
+
+
+def admit_forwarded_views(module_infos, resolver):
+    """Follow native result contracts through direct Cell returns."""
+    cells = {cell.fqname: cell for module in module_infos.values()
+             for cls in module.classes.values() for cell in cls.cells.values()
+             if cell.observed_native_binding is not None}
+    dependents = defaultdict(list)
+    pending = deque(cell for cell in cells.values() if cell.native_provider_binding is not None)
+    for cell in cells.values():
+        info = cell.parent
+        formula = info.visitor.formula_defs[info.name][cell.name]
+        if formula.returns is not None:
+            continue
+        body = statements(formula.body)
+        if body and isinstance(body[0], cst.Expr) and isinstance(
+                body[0].value, (cst.SimpleString, cst.ConcatenatedString)):
+            body = body[1:]
+        if len(body) != 1 or not isinstance(body[0], cst.Return):
+            continue
+        call = body[0].value
+        if not isinstance(call, cst.Call):
+            continue
+        chain = _extract_self_chain(call.func)
+        if not isinstance(chain, list) or CstFacts(formula.body.body).stores[MX_SELF]:
+            continue
+        if _declares_result(helper_reference(call.func, info.refs), call, cell.observed_native_binding):
+            pending.append(cell)
+            continue
+        if arguments(call) is None:
+            continue
+        status, target = resolver.resolve_chain(info.fqname, chain)
+        if (status == RESOLVED and target in cells
+                and cells[target].observed_native_binding.identity
+                == cell.observed_native_binding.identity):
+            dependents[target].append(cell)
+
+    while pending:
+        cell = pending.popleft()
+        if cell.fqname not in resolver.provider_results:
+            cell.forwarded_native_result = True
+            resolver.provider_results[cell.fqname] = cell.native_provider_binding
+            if not cell.has_args():
+                results = resolver.locked_scalar_results if cell.is_locked else resolver.unlocked_scalar_results
+                results[cell.fqname] = cell.get_rettype_expr(c_style=True)
+        pending.extend(dependents.pop(cell.fqname, ()))
 
 
 def analyze_usage(units) -> Dict[str, UsageVerdict]:

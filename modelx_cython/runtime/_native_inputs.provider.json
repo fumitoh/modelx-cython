@@ -1,0 +1,23 @@
+{
+  "protocol": 1,
+  "provider": "modelx_cython.runtime._native_inputs",
+  "abi": "owned-table-1",
+  "types": {
+    "modelx_helpers.immutable_inputs.Table": {
+      "view_type": "NativeTable",
+      "bind": "bind_native_table",
+      "bind_cell": true,
+      "admission": "observed",
+      "handle": {
+        "type": "TableHandle",
+        "build": "table_handle"
+      }
+    },
+    "modelx_helpers.immutable_inputs.Record": {
+      "handle": {
+        "type": "RecordHandle",
+        "build": "record_handle"
+      }
+    }
+  }
+}

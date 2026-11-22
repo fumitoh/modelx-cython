@@ -49,6 +49,11 @@ def kind():
     ("-x", KIND_FLOAT),
     ("(1 - x)", KIND_FLOAT),
     ("t ** 2", KIND_INT),
+    ("t ** +2", KIND_INT),
+    ("t ** -0", KIND_INT),
+    ("2 ** -1", KIND_UNKNOWN),
+    ("2 ** t", KIND_UNKNOWN),
+    ("2 ** (2 ** -1)", KIND_UNKNOWN),
     ("x ** 2", KIND_FLOAT),
     # resolved through the model
     ("self.rate(t)", KIND_FLOAT),
@@ -98,11 +103,18 @@ class _FakeCells:
     fqname = formula_fqname = CLS + "._f_target"
     params = ("t", "x")
 
+    def __init__(self, return_type="object"):
+        self.return_type = return_type
+
     def has_args(self):
         return True
 
     def has_typeinfo(self):
         return True
+
+    def get_rettype_expr(self, c_style=False):
+        assert c_style
+        return self.return_type
 
     def get_argtype_expr(self, arg, c_style=False, formula=False):
         # the C-style spelling is what kind_of_type_expr matches, so a
@@ -113,9 +125,10 @@ class _FakeCells:
         return "long long" if arg == "t" else "double"
 
 
-def _rewrite(body: str) -> str:
+def _rewrite(body: str, *, builtin_float=False, return_type="object") -> str:
     resolver = CellsResolver(
-        cells_by_class={CLS: {"rate": RATE, "arr": ARR}},
+        cells_by_class={CLS: {"rate": RATE, "mort_rate": RATE, "lapse_rate": RATE,
+                              "transfer_rate": RATE, "arr": ARR}},
         refs_by_class={CLS: {}},
         spaces_by_class={CLS: {}},
     )
@@ -123,9 +136,10 @@ def _rewrite(body: str) -> str:
     out = rewrite_powers(
         func, resolver,
         cells_kinds={RATE: KIND_FLOAT, ARR: KIND_UNKNOWN},
-        ref_kinds={CLS: {}},
+        ref_kinds={CLS: {"discount_rate": KIND_FLOAT}},
         cls_fqname=CLS,
-        cells=_FakeCells(),
+        cells=_FakeCells(return_type),
+        builtin_float=builtin_float,
     )
     return cst.Module([]).code_for_node(out)
 
@@ -142,6 +156,65 @@ def _rewrite(body: str) -> str:
 def test_floating_exponent_is_rewritten(body):
     assert "_mx_sys._mx_pow(" in _rewrite(body)
     assert "**" not in _rewrite(body)
+
+
+def test_annotated_float_locals_are_native_only_for_the_builtin():
+    body = "base: float = x\n    years: float = t / 12.0\n    return base ** years"
+    assert "_mx_sys._mx_pow(base, years)" in _rewrite(body, builtin_float=True)
+    assert "base ** years" in _rewrite(body)
+
+
+def test_float_local_rebinding_does_not_prove_the_power():
+    body = "base: float = x\n    base = self.arr(t)\n    return base ** 0.5"
+    assert "base ** 0.5" in _rewrite(body, builtin_float=True)
+
+
+@pytest.mark.parametrize("local, cell, zero_guard", [
+    ("q", "mort_rate", ""),
+    ("w", "lapse_rate", "    if w <= 0.0:\n        return 0.0\n"),
+    ("th", "transfer_rate", "    if th <= 0.0:\n        return 0.0\n"),
+])
+def test_double_cell_local_feeds_native_return_power(local, cell, zero_guard):
+    body = (f"{local} = self.{cell}(t)\n"
+            f"{zero_guard}"
+            f"    if {local} >= 1.0:\n"
+            "        return 1.0 if self.is_anniv(t) else 0.0\n"
+            f"    return 1.0 - (1.0 - {local}) ** (1.0 / 12.0)")
+    out = _rewrite(body, return_type="double")
+    assert f"_mx_sys._mx_pow((1.0 - {local}), (1.0 / 12.0))" in out
+    assert out.count(f"self.{cell}(t)") == 1
+    assert f"if {local} >= 1.0:" in out
+    assert "**" not in out
+    assert "**" in _rewrite(body)
+
+
+def test_double_reference_local_feeds_native_return_power():
+    body = ("j = self.discount_rate\n"
+            "    if j == 0.0:\n        return 0.0\n"
+            "    return (1.0 - (1.0 + j) ** (-t / 12.0)) / ((1.0 + j) ** (1.0 / 12.0) - 1.0)")
+    out = _rewrite(body, return_type="double")
+    assert out.count("_mx_sys._mx_pow(") == 2
+    assert "**" not in out
+    assert "**" in _rewrite(body)
+
+
+@pytest.mark.parametrize("body", [
+    "base = self.rate(t)\n    root = base ** 0.5\n    return root",
+    "base = self.rate(t)\n    return max(0.0, base ** 0.5)",
+    "base = self.rate(t)\n    return self.arr(t) + base ** 0.5",
+    "base = self.rate(t)\n    return base ** -t",
+    "base = self.rate(t)\n    base = self.arr(t)\n    return base ** 0.5",
+    "base = self.arr(t)\n    return base ** 0.5",
+    "base = x\n    return base ** 0.5",
+    "if t:\n        return base ** 0.5\n    base = self.rate(t)\n    return 0.0",
+    "if t:\n        base = self.rate(t)\n    return base ** 0.5",
+    "self = other\n    base = self.rate(t)\n    return base ** 0.5",
+    "base = self.rate(t)\n    return sum(base ** 0.5 for base in (x,))",
+])
+def test_cell_local_power_keeps_unproved_uses(body):
+    out = _rewrite(body, return_type="double")
+    assert "_mx_sys._mx_pow(" not in out
+    assert "**" in out
 
 
 @pytest.mark.parametrize("body", [
@@ -352,3 +425,116 @@ def test_demote_rebound_params_uncached_cells_everywhere():
     cells = make_rebound("t = t / 2\nreturn t", {"t": int},
                          has_formula_def=False)
     assert cells.get_argtype_expr("t", c_style=True) == "object"
+
+
+def test_assigned_local_kinds_from_every_assignment():
+    """D59: a local takes a kind only when every binding of it has that kind."""
+    import libcst as cst
+    from modelx_cython.powers import _assigned_local_kinds, KIND_FLOAT, KIND_INT
+
+    class _NoResolve:
+        def resolve_chain(self, *args):
+            return None, None
+
+    source = (
+        'def f(self, t, i):\n'
+        '    v = 1.0 / (1.0 + i)\n'
+        '    total = 0.0\n'
+        '    k = 1\n'
+        '    mixed = 0\n'
+        '    step = 3 if t else 6\n'
+        '    either = 1 if t else 0.5\n'
+        '    while True:\n'
+        '        s = t + (k - 1) * step\n'
+        '        if s > 40:\n'
+        '            break\n'
+        '        total += v ** ((s - t) / 12.0)\n'
+        '        mixed += 0.5\n'
+        '        k += 1\n'
+        '    for j in range(3):\n'
+        '        looped = j\n'
+        '    return total\n')
+    body = cst.parse_module(source).body[0].body.body
+    kinds = _assigned_local_kinds(body, ('t', 'i'), _NoResolve(), {}, {}, 'm.C',
+                                  {'t': KIND_INT, 'i': KIND_FLOAT})
+    assert kinds == {'v': KIND_FLOAT, 'total': KIND_FLOAT, 'k': KIND_INT, 'step': KIND_INT,
+                     's': KIND_INT, 'j': KIND_INT, 'looped': KIND_INT}, kinds
+
+
+@pytest.mark.parametrize("body, count", [
+    # an accumulator started at a double: the power is an operand of its arithmetic
+    ("v = 1.0 / (1.0 + self.rate(t))\n    total = 0.0\n    k = 1\n"
+     "    while k < 5:\n        total += (1.0 / 4) * v ** ((k - t) / 12.0)\n        k += 1\n    return total", 1),
+    # inside a typed range loop, with the bound from a parameter
+    ("v = self.rate(t)\n    total = 0.0\n    for j in range(t):\n        total = total + v ** (j / 12.0)\n"
+     "    return total", 1),
+])
+def test_power_into_a_double_accumulator_is_native(body, count):
+    """D62: the power's value flows into a local that is a double without it."""
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == count, out
+    assert "**" not in out
+
+
+@pytest.mark.parametrize("body", [
+    # the only double assignment is the power itself: Python's semantics stay
+    "v = self.rate(t)\n    root = v ** 0.5\n    return root",
+    # the accumulator also takes a value of unknown kind
+    "v = self.rate(t)\n    total = 0.0\n    total += v ** 0.5\n    total += self.arr(t)\n    return total",
+    # the base is unknown
+    "total = 0.0\n    total += self.arr(t) ** 0.5\n    return total",
+    # the accumulator is an integer
+    "v = self.rate(t)\n    total = 0\n    total += v ** 0.5\n    return total",
+])
+def test_power_outside_a_double_sink_keeps_python_semantics(body):
+    out = _rewrite(body)
+    assert "_mx_sys._mx_pow(" not in out and "**" in out, out
+
+
+def test_power_accumulated_with_max_of_doubles_is_native():
+    """DIA_US_S annuity_factor: ``total += c * v ** e * max(cert, lf)``."""
+    body = ("v = 1.0 / (1.0 + self.rate(t))\n    cert = self.rate(t) if t else 0.0\n    lf = self.rate(t)\n"
+            "    total = 0.0\n    k = 1\n    while k < 5:\n"
+            "        total += (1.0 / 4) * v ** ((k - t) / 12.0) * max(cert, lf)\n        k += 1\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
+    assert "**" in _rewrite(body.replace("max(cert, lf)", "max(cert, self.arr(t))"))
+    assert "**" in _rewrite("max = self.rate\n    " + body)
+
+
+def test_range_loop_bound_from_int_of_a_number():
+    """DIA_US_S annuity_factor (range spelling): ``n = int(...)``; ``for k in range(1, n + 1)``."""
+    body = ("v = self.rate(t)\n    n = int((40 - t) // 3)\n    total = 0.0\n"
+            "    for k in range(1, n + 1):\n        total += v ** ((3 * k) / 12.0) * max(v, 0.5)\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
+    assert "**" in _rewrite("int = self.arr\n    " + body)
+def test_local_kinds_through_declarations_and_compiler_casts():
+    """diag-us (SPIA_US_S commuted_value): a loop variable declared before its loop
+    (``s: _mx_cy.longlong``) and a value guarded by the overflow cast keep their kinds,
+    so the power in one branch of the accumulator's operand is native."""
+    body = ("n = 12\n    j = self.rate(t)\n    total = 0.0\n    s: _mx_cy.longlong\n"
+            "    for s in range(t + 1, n):\n"
+            "        yrs = ((s - t) / 12.0 if t >= 0 else _mx_cy.cast(_mx_cy.double, (_mx_cy.cast(object, s) - t) / 12.0))\n"
+            "        if t > 3:\n            v = (1.0 + j) ** (-yrs)\n        else:\n            v = max(0.0, 1.0 - j * yrs)\n"
+            "        total += self.rate(s) * v\n    return total")
+    out = _rewrite(body)
+    assert out.count("_mx_sys._mx_pow(") == 1 and "**" not in out, out
+    # without the declaration rule or the cast rule the chain breaks: the power stays Python's
+    assert "**" in _rewrite(body.replace("_mx_cy.cast(_mx_cy.double, ", "self.arr(").replace(
+        "/ 12.0))\n", "/ 12.0))\n", 1))
+
+
+def test_formula_local_kinds_reads_the_formula_body():
+    import libcst as cst
+    from modelx_cython.powers import formula_local_kinds, KIND_INT, KIND_FLOAT
+
+    class _NoResolve:
+        def resolve_chain(self, *args):
+            return None, None
+
+    node = cst.parse_module('def f(self, t):\n    k = t - 3\n    s: _mx_cy.longlong\n'
+                            '    for s in range(k):\n        pass\n    q = 0.5 ** k\n    return q\n').body[0]
+    kinds = formula_local_kinds(node, ('t',), _NoResolve(), {}, {}, 'm.C', {'t': KIND_INT})
+    assert kinds == {'k': KIND_INT, 's': KIND_INT, 'q': KIND_FLOAT}, kinds
+    assert formula_local_kinds(node, ('t',), None, {}, {}, 'm.C', {'t': KIND_INT}) == {}

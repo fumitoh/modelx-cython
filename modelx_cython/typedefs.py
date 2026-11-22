@@ -129,3 +129,17 @@ def get_type_expr(typ, c_style=False):
         return "str"
     else:
         return "object"
+
+
+INT64_MIN, INT64_MAX = -(1 << 63), (1 << 63) - 1
+
+
+def primitive_kind(value):
+    """Represent a literal exactly, without narrowing arbitrary Python ints."""
+    if type(value) is bool:
+        return 'bint'
+    if type(value) is int and INT64_MIN <= value <= INT64_MAX:
+        return 'longlong'
+    if type(value) is float:
+        return 'double'
+    return None
