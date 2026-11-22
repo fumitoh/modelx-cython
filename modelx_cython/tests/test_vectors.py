@@ -93,7 +93,9 @@ def test_tuple_of_vectors_and_derived_index():
 ''', ('T', ('V', 'V')))
     assert f'a = {A}.vec_of(_mx_v1_u)' in code
     assert 'cy: _mx_cy.longlong' in code and report['derived_index_locals'] == ['cy']
-    assert f'pols.data[i + 1] = a.data[i] * {A}.vec_get(b, cy)' in code
+    assert ('pols.data[i + 1] = a.data[i] * '
+            '(b.data[cy] if _mx_cy.cast(_mx_cy.ulonglong, cy) < _mx_cy.cast(_mx_cy.ulonglong, b.n) '
+            f'else {A}.vec_get(b, cy))') in code
     assert 'return (pols, a)' in code
 
 

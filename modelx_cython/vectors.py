@@ -1556,6 +1556,34 @@ class _Unchecked(cst.CSTTransformer):
         return updated
 
 
+class _CheckedFloatReads(cst.CSTTransformer):
+    """Emit the bounds check at the use site for an index held in a C local."""
+
+    def __init__(self, vectors, indices):
+        self.vectors = vectors
+        self.indices = indices
+
+    def on_visit(self, node):
+        # A nested scope can rebind a name with different typing.
+        return not isinstance(node, (cst.FunctionDef, cst.ClassDef, cst.Lambda,
+                                     cst.ListComp, cst.SetComp, cst.DictComp, cst.GeneratorExp))
+
+    def leave_Call(self, original, updated):
+        if dotted_name(updated.func) != fn('get', 'V') or not _plain_args(updated, 2, 2):
+            return updated
+        vector, index = (arg.value for arg in updated.args)
+        if (not isinstance(vector, cst.Name) or self.vectors.get(vector.value) != 'V'
+                or not isinstance(index, cst.Name) or index.value not in self.indices):
+            return updated
+        # Both operands are stable C locals. The fallback still implements
+        # Python's negative index and out-of-range behavior.
+        v, i = vector.value, index.value
+        return _expr(
+            f'({v}.data[{i}] if {CY_MOD}.cast({CY_MOD}.ulonglong, {i}) '
+            f'< {CY_MOD}.cast({CY_MOD}.ulonglong, {v}.n) else {_code(updated)})'
+        )
+
+
 def range_loop_locals(body, builtins):
     """Names bound only as the target of ``for NAME in range(...)`` (builtin range)."""
     kinds = {}
@@ -1822,6 +1850,8 @@ def lower(node, cls_info, cells, scope, counter, module, ref_kinds=None):
     body, converted = _object_uses(body, typed, {n: s for n, s in lowering.shapes.items()
                                                  if s in ('V', 'I') or isinstance(s, tuple)},
                                    cells.vector_shape if cells.vector_shape in ("V", "I") or isinstance(cells.vector_shape, tuple) else None)
+    if derived:
+        body = body.visit(_CheckedFloatReads(typed, set(derived)))
     for name, items in lowering.facts.assigns.items():
         # a local bound only as the target of loops over vectors holds C elements
         if (name not in cells.params and name not in loops and items

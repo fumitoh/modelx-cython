@@ -62,6 +62,13 @@ FORMULAS = {
     "length": "def length(t):\n    return len(cohorts(t)[0]) + len(ids(t))\n",
     "id_sum": "def id_sum(t):\n    v = ids(t)\n    return sum(v) + v[-1] + sum(v[1:])\n",
     "element": "def element(t, z):\n    v = cohorts(t)[0]\n    return v[z - 1] if 1 <= z <= len(v) else 0.0\n",
+    "checked": """def checked(t):
+    v = [-1.0, 0.0, 2.0]
+    for i in range(t, t + 1):
+        cy = i
+        return v[cy]
+    return 0.0
+""",
     "fallback": "def fallback(t):\n    v = shifted(t)\n    return max(v) + len([x for x in v if x > 0.1]) + sum(v[::2])\n",
     "values": "def values():\n    return [float(k) * 0.1 for k in range(1, 9)]\n",
     "noise": '''def noise(k):
@@ -87,6 +94,8 @@ for t in range(-1, 9):
         p.element(t, z)
 p.factors()
 p.values()
+for k in range(-3, 3):
+    p.checked(k)
 """
 
 CHECK = """\
@@ -130,6 +139,16 @@ for name, kind in VECTORS.items():
         assert pickle.loads(pickle.dumps(p)) == p
         assert list(p) == p and len(p) == len(list(p))      # D154: a list (never equal to a tuple)
 assert type(c.listed(2)).__name__ == 'list' and c.listed(2) == [o.rate(2), 2.0]
+
+for k in range(-3, 3):
+    assert bits(o.checked(k)) == bits(c.checked(k)), k
+for k in (-4, 3):
+    try:
+        c.checked(k)
+    except IndexError:
+        pass
+    else:
+        raise AssertionError(k)
 
 for k in range(40):
     assert bits(o.noise_sum(k)) == bits(c.noise_sum(k)), k
@@ -180,7 +199,7 @@ def _build(tmp_path, formulas):
 
 def test_vector_cells_compile_to_typed_buffers(tmp_path):
     _build(tmp_path, FORMULAS)
-    names = sorted(name for name in FORMULAS if name not in ("factors", "values", "element", "noise",
+    names = sorted(name for name in FORMULAS if name not in ("factors", "values", "element", "checked", "noise",
                                                               "noise_sum"))
     (tmp_path / "sample.py").write_text(SAMPLE.format(names=names) + (
         "for k in range(40):\n    p.noise_sum(k)\n"), encoding="utf-8")

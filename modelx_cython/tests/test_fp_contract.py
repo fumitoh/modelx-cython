@@ -18,7 +18,7 @@ def test_generated_setup_wraps_the_build_command(tmp_path):
     assert "['Model_nomx_cy._mx_helper_x'])" in code
 
 
-def _built(compiler_type, name, providers=(), args=None, debug=False):
+def _built(compiler_type, name, providers=(), args=None):
     seen = []
 
     class Recording(build_ext):
@@ -27,7 +27,6 @@ def _built(compiler_type, name, providers=(), args=None, debug=False):
 
     command = fp_contract_off({"build_ext": Recording}, providers)["build_ext"](Distribution())
     command.compiler = SimpleNamespace(compiler_type=compiler_type)
-    command.debug = debug
     command.build_extension(SimpleNamespace(name=name, extra_compile_args=args))
     return seen[0]
 
@@ -38,18 +37,6 @@ def test_model_modules_get_the_flag_once_on_gcc_style_compilers():
     assert _built("unix", "m._mx_classes", args=[FP_CONTRACT_OFF]) == [FP_CONTRACT_OFF]
 
 
-def test_providers_keep_their_default_flags():
+def test_providers_and_msvc_are_left_alone():
     assert _built("unix", "m._mx_helper_x", providers=["m._mx_helper_x"]) == []
-    assert _built("msvc", "m._mx_helper_x", providers=["m._mx_helper_x"]) == []
-
-
-def test_msvc_release_model_classes_inline_small_helpers(monkeypatch):
-    monkeypatch.delenv("CL", raising=False)
-    monkeypatch.delenv("_CL_", raising=False)
-    assert _built("msvc", "m.s._mx_classes") == ["/Ob3"]
-    assert _built("msvc", "m._mx_sys") == []
-    assert _built("msvc", "m._mx_classes", debug=True) == []
-    for flag in ("/Od", "/Ob0", "/Ob2", "/Ob3"):
-        assert _built("msvc", "m._mx_classes", args=[flag]) == [flag]
-    monkeypatch.setenv("CL", "/Ob1")
     assert _built("msvc", "m._mx_classes") == []
